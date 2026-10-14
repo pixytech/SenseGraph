@@ -4,5 +4,6 @@
   "icon": "SG",
   "color": "#06b6d4",
   "order": 25,
-  "access": "private"
+  "access": "public",
+  "url": "https://pixytech.github.io/SenseGraph/"
 }

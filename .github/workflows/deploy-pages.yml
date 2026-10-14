@@ -1,7 +1,4 @@
-# Builds the web app and force-pushes it to this repo's `site` branch. The
-# Pixytech portal serves that branch at /apps/sensegraph/ to signed-in people in the
-# app-sensegraph team. Nothing here is public.
-name: Publish site
+name: Deploy to GitHub Pages
 
 on:
   push:
@@ -9,17 +6,19 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: publish-site
+  group: pages
   cancel-in-progress: true
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     env:
-      BASE_PATH: /apps/sensegraph/
+      BASE_PATH: /SenseGraph/
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,12 +35,16 @@ jobs:
       # Models are loaded from the dropdown at runtime, so no data is baked in.
       - name: Build the web app
         run: npx nx build web
-      # One commit, force-pushed, so old builds do not pile up in history.
-      - name: Push to site branch
-        working-directory: apps/web/dist
-        run: |
-          git init -q -b site
-          git add -A
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -q -m "Site build from ${GITHUB_SHA}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

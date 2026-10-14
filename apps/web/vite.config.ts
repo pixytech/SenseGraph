@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// BASE_PATH is set by the Pages workflow, for example "/apps/sensegraph/".
+// BASE_PATH is set by the Pages workflow, for example "/SenseGraph/".
 export default defineConfig({
   base: process.env.BASE_PATH || "/",
   plugins: [react()],

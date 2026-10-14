@@ -13,4 +13,4 @@ npx nx build web    # production build in apps/web/dist
 No data files are needed. Choose a model in the dropdown and the app downloads
 its tokenizer and embedding tensor from Hugging Face once, then runs both
 engines on that same data.
-Set `BASE_PATH` (for example `/apps/sensegraph/`) when building for a sub-path.
+Set `BASE_PATH` (for example `/SenseGraph/`) when building for a sub-path.

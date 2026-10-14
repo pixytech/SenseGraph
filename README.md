@@ -245,18 +245,16 @@ npx nx graph                              # project dependency graph
 
 ## Access and publishing
 
-This repository is private. The web app is published to the Pixytech portal as a
-private app, so it only shows for signed-in people who are allowed to see it.
+This repository is public. The web app is deployed to GitHub Pages at
+https://pixytech.github.io/SenseGraph/ and listed on the Pixytech portal as a
+public app.
 
-- `portal.json` marks the app as `private`.
-- `.github/workflows/publish-site.yml` builds the web app with the base path
-  `/apps/sensegraph/` and force-pushes the output to the `site` branch.
-- The portal serves that branch at `/apps/sensegraph/` to members of the `app-sensegraph` team
-  in the Pixytech organisation (and to `portal-admins`).
+- `portal.json` marks the app as `public` and points at the Pages URL.
+- `.github/workflows/deploy-pages.yml` builds the web app with the base path
+  `/SenseGraph/` and deploys it with GitHub Pages.
 
-One-time setup: add this repository to the Pixytech Portal GitHub App, create the
-`app-sensegraph` team with no repository access, add the people who should see it, and
-run the Publish site workflow once.
+One-time setup: in the repository settings, set Pages to deploy from GitHub
+Actions, and add this repository to the Pixytech Portal GitHub App.
 
 ## Supported Models
 
