@@ -25,9 +25,15 @@ export function contentIds(ids: number[], label: (id: number) => string): { used
 
 // Drops whitespace-only tokens. For search queries it also drops stop words and
 // one character tokens, which add noise when ranking by meaning.
-export function cleanResults(results: SimilarResult[], topK: number, search: boolean): SimilarResult[] {
+export function cleanResults(
+  results: SimilarResult[],
+  topK: number,
+  search: boolean,
+  queryWords: string[] = [],
+): SimilarResult[] {
   const out: SimilarResult[] = [];
-  const seen = new Set<string>();
+  // The query's own words (in any case, with or without a leading space) are not answers.
+  const seen = new Set<string>(queryWords.map((w) => w.trim().toLowerCase()));
   for (const r of results) {
     const t = r.word.trim();
     if (t.length === 0) continue;

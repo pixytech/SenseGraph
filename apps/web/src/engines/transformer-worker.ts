@@ -212,7 +212,7 @@ function handleRank(type: "similar" | "search", text: string, topK: number) {
   const { used, ignored } = type === "search" ? contentIds(ids, text_of) : { used: ids, ignored: [] as number[] };
   const { results, ops } = fullVocabAttentionSearch(used, topK + 20);
   const latencyMs = performance.now() - t0;
-  const cleaned = cleanResults(results, topK, type === "search");
+  const cleaned = cleanResults(results, topK, type === "search", type === "search" ? used.map(text_of) : []);
   post({ type: "result", data: { type, query: text, results: cleaned, latencyMs, operationCount: ops, engine: "transformer", tokens: ids.map(text_of), ignored: ignored.map(text_of) } });
 }
 

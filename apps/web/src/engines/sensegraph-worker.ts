@@ -390,7 +390,7 @@ function handleRank(type: "similar" | "search", text: string, topK: number) {
     }
     const { used, ignored } = type === "search" ? contentIds(ids, label) : { used: ids, ignored: [] as number[] };
     const { results, candidates } = rank(used, topK + 20);
-    const cleaned = cleanResults(results, topK, type === "search");
+    const cleaned = cleanResults(results, topK, type === "search", type === "search" ? used.map(label) : []);
     post({ type: "result", data: { type, query: text, results: cleaned, latencyMs: performance.now() - t0, engine: "sensegraph", tokens: ids.map(label), ignored: ignored.map(label), candidates } });
   } catch (err: any) {
     post({ type: "result", data: { type, query: text, results: [], latencyMs: 0, engine: "sensegraph", error: String(err) } });
