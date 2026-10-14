@@ -25,4 +25,4 @@ jobs:
       # the setup-node step.
       - run: npm install
       - name: Test, typecheck and build every project
-        run: npx nx run-many -t test typecheck build
+        run: npx nx run-many -t test typecheck build --outputStyle=stream
