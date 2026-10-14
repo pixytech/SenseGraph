@@ -304,5 +304,5 @@ Status is as of this version.
 | Phrase and n-gram nodes, positional weighting | Not started. Addresses word order and compositional phrases. |
 | WebGPU compute for the graph build | Not started. Speedup over CPU is a goal, not a measurement. |
 | Approximate nearest-neighbor index for the build | Not started. Would reduce the quadratic build cost. |
-| Batched candidate scoring in the Rust core | Not started. A phrase query currently makes about a thousand small WASM calls. |
+| Batched candidate scoring in the Rust core | Done. `score_candidates` scores a whole candidate list in one WASM call, with one dot product per candidate. It replaces about a thousand small calls per phrase query. |
 | Learning context indicators from text corpora | Not started. Today they are added by hand for a few words in the CLI. |

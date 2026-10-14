@@ -124,3 +124,30 @@ fn top_k_raw_exclude(
     results.truncate(k);
     results
 }
+
+/// Scores many candidates against a weighted group of query tokens in one pass.
+///
+/// For candidate c the score is `sum(count_q * cos(c, q)) / ||sum(count_q * q_hat)||`,
+/// which equals the cosine between c and the weighted mean of the normalized query
+/// vectors. The weighted query vector is built once, so each candidate costs a single
+/// dot product regardless of how many query tokens there are.
+pub fn score_candidates(store: &VectorStore, candidates: &[u32], query_ids: &[u32], counts: &[f32]) -> Vec<f32> {
+    let dim = store.embed_dim();
+    let mut combined = vec![0.0f32; dim];
+    for (i, &q) in query_ids.iter().enumerate() {
+        let weight = counts.get(i).copied().unwrap_or(1.0) / store.get_norm(q as usize);
+        for (acc, v) in combined.iter_mut().zip(store.get_vector(q as usize).iter()) {
+            *acc += weight * v;
+        }
+    }
+    let combined_norm = combined.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+
+    candidates
+        .iter()
+        .map(|&c| {
+            let v = store.get_vector(c as usize);
+            let dot: f32 = combined.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
+            dot / (combined_norm * store.get_norm(c as usize))
+        })
+        .collect()
+}

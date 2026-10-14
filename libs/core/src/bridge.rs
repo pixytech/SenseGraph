@@ -237,6 +237,13 @@ pub fn query_similar_weighted(handle: u32, indices: &[u32], weights: &[f32], top
     })
 }
 
+/// Scores a batch of candidates against a weighted group of query tokens in one call.
+/// Returns one score per candidate, in the same order as `candidates`.
+#[wasm_bindgen]
+pub fn score_candidates(handle: u32, candidates: &[u32], query_ids: &[u32], counts: &[f32]) -> Result<Vec<f32>, JsValue> {
+    with_vectors(handle, |s| similarity::score_candidates(s, candidates, query_ids, counts))
+}
+
 #[wasm_bindgen]
 pub fn cosine_sim(handle: u32, a: u32, b: u32) -> Result<f32, JsValue> {
     with_vectors(handle, |s| similarity::cosine_similarity(s, a as usize, b as usize))

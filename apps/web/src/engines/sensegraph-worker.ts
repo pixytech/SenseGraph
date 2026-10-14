@@ -6,6 +6,7 @@ import init, {
   query_similar,
   query_similar_multi,
   cosine_sim,
+  score_candidates,
   vector_store_stats,
   init_neighbor_graph,
   export_neighbor_graph,
@@ -341,28 +342,31 @@ function rank(ids: number[], k: number): { results: SimilarResult[]; candidates:
     return { results: toResults(query_similar_multi(storeHandle!, new Uint32Array(ids), k) as any[]), candidates: 0 };
   }
 
-  const norm = groupNorm(counts);
-  const scoreOf = (c: number): number => {
-    let dot = 0;
-    for (const [q, n] of counts) dot += n * cosine_sim(storeHandle!, c, q);
-    return dot / norm;
+  // Scoring is batched: one WASM call scores a whole list of candidates.
+  const queryIdsArr = Uint32Array.from(counts.keys());
+  const queryCounts = Float32Array.from(counts.values());
+  const scoreMany = (list: number[]): SimilarResult[] => {
+    if (list.length === 0) return [];
+    const scores = score_candidates(storeHandle!, Uint32Array.from(list), queryIdsArr, queryCounts);
+    return list.map((c, i) => ({ word: label(c), score: scores[i], index: c }));
   };
-  const scored: SimilarResult[] = [];
-  for (const c of candidates) scored.push({ word: label(c), score: scoreOf(c), index: c });
+
+  const scored = scoreMany([...candidates]);
   scored.sort((a, b) => b.score - a.score);
 
   // Refinement round: the best candidates so far are themselves well connected, so their
   // neighbors are likely to contain results that no single query token lists directly.
   const seen = new Set<number>(candidates);
   for (const q of counts.keys()) seen.add(q);
-  const frontier = scored.slice(0, REFINE_TOP);
-  for (const f of frontier) {
+  const extra: number[] = [];
+  for (const f of scored.slice(0, REFINE_TOP)) {
     for (const r of neighborsOf(f.index)) {
       if (seen.has(r.index)) continue;
       seen.add(r.index);
-      scored.push({ word: label(r.index), score: scoreOf(r.index), index: r.index });
+      extra.push(r.index);
     }
   }
+  scored.push(...scoreMany(extra));
   scored.sort((a, b) => b.score - a.score);
   return { results: scored.slice(0, k), candidates: scored.length };
 }
