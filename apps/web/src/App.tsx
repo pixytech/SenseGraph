@@ -3,7 +3,7 @@ import { useEngine } from "./hooks/useEngine";
 import type { EngineResult, BenchmarkSample } from "./engines/types";
 import { MODELS, getSpeedIcons } from "./models";
 import { promptsFor } from "./suite";
-import { overlapAtK } from "./engines/shared";
+import { overlapAtK, formatMs, formatSpeedup } from "./engines/shared";
 import { loadModel as downloadModel } from "./engines/model-loader";
 import "./App.css";
 
@@ -50,6 +50,8 @@ export default function App() {
     })()
   );
   const prompts = useMemo(() => promptsFor(MODELS.find((m) => m.id === selectedModel)), [selectedModel]);
+  const manualRef = useRef<{ type: string; query: string } | null>(null);
+  const [manual, setManual] = useState<{ transformer: EngineResult | null; sensegraph: EngineResult | null }>({ transformer: null, sensegraph: null });
   const waitersRef = useRef<Map<string, (r: EngineResult) => void>>(new Map());
   const [suiteRows, setSuiteRows] = useState<SuiteRow[]>([]);
   const [suiteRunning, setSuiteRunning] = useState(false);
@@ -94,6 +96,10 @@ export default function App() {
 
   useEffect(() => {
     sensegraph.onResult((r: EngineResult) => {
+      const mq = manualRef.current;
+      if (mq && mq.type === r.type && mq.query === r.query) {
+        setManual((m) => ({ ...m, [r.engine]: r }));
+      }
       const waiter = waitersRef.current.get(`${r.engine}|${r.type}|${r.query}`);
       if (waiter) {
         waitersRef.current.delete(`${r.engine}|${r.type}|${r.query}`);
@@ -110,6 +116,10 @@ export default function App() {
       }
     });
     transformer.onResult((r: EngineResult) => {
+      const mq = manualRef.current;
+      if (mq && mq.type === r.type && mq.query === r.query) {
+        setManual((m) => ({ ...m, [r.engine]: r }));
+      }
       const waiter = waitersRef.current.get(`${r.engine}|${r.type}|${r.query}`);
       if (waiter) {
         waitersRef.current.delete(`${r.engine}|${r.type}|${r.query}`);
@@ -133,6 +143,8 @@ export default function App() {
     if (!query.trim() || !bothReady) return;
     const text = query.trim();
     const parts = text.split(/\s+/);
+    manualRef.current = { type: taskType, query: taskType === "compare" ? `${parts[0]} vs ${parts.slice(1).join(" ")}` : text };
+    setManual({ transformer: null, sensegraph: null });
     if (taskType === "similar") {
       sensegraph.send({ type: "similar", word: text, topK: 15 });
       transformer.send({ type: "similar", word: text, topK: 15 });
@@ -303,11 +315,11 @@ export default function App() {
           </section>
 
           <section className="results-row">
-            <ResultPanel title="Baseline" result={transformer.state.lastResult} color="var(--transformer)" />
-            <ResultPanel title="SenseGraph" result={sensegraph.state.lastResult} color="var(--sensegraph)" />
+            <ResultPanel title="Baseline" result={manual.transformer} color="var(--transformer)" />
+            <ResultPanel title="SenseGraph" result={manual.sensegraph} color="var(--sensegraph)" />
           </section>
 
-          <AgreementBar baseline={transformer.state.lastResult} sensegraph={sensegraph.state.lastResult} />
+          <AgreementBar baseline={manual.transformer} sensegraph={manual.sensegraph} />
 
           <section className="bench-section">
             <h3>Complex task suite</h3>
@@ -347,7 +359,7 @@ export default function App() {
                   <StatCard label="SenseGraph Avg" value={`${avgLatency("sensegraph").toFixed(1)}ms`} color="var(--sensegraph)" />
                   <StatCard label="Transformer P95" value={`${p95Latency("transformer").toFixed(1)}ms`} color="var(--transformer)" />
                   <StatCard label="SenseGraph P95" value={`${p95Latency("sensegraph").toFixed(1)}ms`} color="var(--sensegraph)" />
-                  <StatCard label="Speedup" value={avgLatency("sensegraph") > 0 ? `${(avgLatency("transformer") / avgLatency("sensegraph")).toFixed(0)}x` : "n/a"} color="var(--accent)" />
+                  <StatCard label="Speedup" value={formatSpeedup(avgLatency("transformer"), avgLatency("sensegraph"))} color="var(--accent)" />
                   <StatCard label="Queries" value={`${samples.length}`} color="var(--text-dim)" />
                 </div>
                 <div className="latency-chart">
@@ -368,14 +380,13 @@ export default function App() {
 function AgreementBar({ baseline, sensegraph }: { baseline: EngineResult | null; sensegraph: EngineResult | null }) {
   if (!baseline || !sensegraph || baseline.query !== sensegraph.query || baseline.type !== sensegraph.type) return null;
   if (baseline.error || sensegraph.error) return null;
-  const speed = sensegraph.latencyMs > 0 ? baseline.latencyMs / sensegraph.latencyMs : 0;
   if (baseline.type === "compare") {
     const a = baseline.results[0]?.score ?? 0;
     const b = sensegraph.results[0]?.score ?? 0;
     return (
       <section className="agreement">
         <span>Score difference: {Math.abs(a - b).toExponential(1)}</span>
-        <span>Speedup: {speed.toFixed(1)}x</span>
+        <span>Speedup: {formatSpeedup(baseline.latencyMs, sensegraph.latencyMs)}</span>
       </section>
     );
   }
@@ -385,7 +396,7 @@ function AgreementBar({ baseline, sensegraph }: { baseline: EngineResult | null;
     <section className="agreement">
       <span>Top-10 overlap: {(overlap * 100).toFixed(0)}%</span>
       <span>Top result: {top1 ? "same" : "different"}</span>
-      <span>Speedup: {speed.toFixed(1)}x</span>
+      <span>Speedup: {formatSpeedup(baseline.latencyMs, sensegraph.latencyMs)}</span>
     </section>
   );
 }
@@ -401,7 +412,7 @@ function SuiteTable({ rows }: { rows: SuiteRow[] }) {
       <div className="stats-grid">
         <StatCard label="Baseline total" value={`${totalTr.toFixed(1)}ms`} color="var(--transformer)" />
         <StatCard label="SenseGraph total" value={`${totalSg.toFixed(1)}ms`} color="var(--sensegraph)" />
-        <StatCard label="Speedup" value={totalSg > 0 ? `${(totalTr / totalSg).toFixed(1)}x` : "n/a"} color="var(--accent)" />
+        <StatCard label="Speedup" value={formatSpeedup(totalTr, totalSg)} color="var(--accent)" />
         <StatCard label="Top-10 overlap" value={`${(meanOverlap * 100).toFixed(0)}%`} color="var(--text-dim)" />
         <StatCard label="Same top result" value={`${(top1Rate * 100).toFixed(0)}%`} color="var(--text-dim)" />
         <StatCard label="Queries" value={`${rows.length}`} color="var(--text-dim)" />
@@ -412,7 +423,7 @@ function SuiteTable({ rows }: { rows: SuiteRow[] }) {
             <summary>
               <span className="suite-query">{i + 1}. {r.query}</span>
               <span className="suite-nums">
-                {r.error ? r.error : `${r.trMs.toFixed(2)}ms vs ${r.sgMs.toFixed(2)}ms, ${r.speedup.toFixed(1)}x, overlap ${(r.overlap * 100).toFixed(0)}%`}
+                {r.error ? r.error : `${formatMs(r.trMs)} vs ${formatMs(r.sgMs)}, ${formatSpeedup(r.trMs, r.sgMs)}, overlap ${(r.overlap * 100).toFixed(0)}%`}
               </span>
             </summary>
             <div className="suite-detail">
@@ -474,7 +485,7 @@ function ResultPanel({ title, result, color }: { title: string; result: EngineRe
         <p className="empty">Run a query to see results</p>
       ) : (
         <>
-          <div className="latency" style={{ color }}>{result.latencyMs.toFixed(1)}ms</div>
+          <div className="latency" style={{ color }}>{formatMs(result.latencyMs)}</div>
           {result.error && <p className="error">{result.error}</p>}
           {result.tokens && result.tokens.length > 0 && (
             <div className="token-row">
