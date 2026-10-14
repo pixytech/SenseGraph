@@ -112,7 +112,7 @@ function downloadEmbeddingTensor(header: SafetensorsHeader, headerSize: number) 
 }
 
 function main() {
-  console.log("CQE Embedding Extractor");
+  console.log("SenseGraph Embedding Extractor");
   console.log(`Model: ${MODEL_ID}\n`);
 
   ensureDir(DATA_DIR);

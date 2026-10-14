@@ -38,7 +38,7 @@ export interface GraphStats {
   edges: number;
 }
 
-export interface CQEEngine {
+export interface SenseGraphEngine {
   handle: number;
   addWord(label: string): number;
   addSense(wordId: number, senseLabel: string): number;
@@ -123,7 +123,7 @@ export function createVectorStore(embedDim: number): VectorStoreHandle {
   };
 }
 
-export function createEngine(): CQEEngine {
+export function createEngine(): SenseGraphEngine {
   const wasm = getWasm();
   const handle: number = wasm.create_graph();
 

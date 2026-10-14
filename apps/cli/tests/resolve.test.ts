@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createEngine, type CQEEngine, type Resolution } from "../src/bridge/wasm-loader.js";
+import { createEngine, type SenseGraphEngine, type Resolution } from "../src/bridge/wasm-loader.js";
 import { seedGraph } from "../src/knowledge/seed.js";
 
-let engine: CQEEngine;
+let engine: SenseGraphEngine;
 
 beforeAll(() => {
   engine = createEngine();

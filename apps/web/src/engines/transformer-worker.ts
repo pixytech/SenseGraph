@@ -1,5 +1,6 @@
 import type { WorkerMessage, WorkerResponse, SimilarResult } from "./types";
 import { createTokenizer, type BPETokenizer } from "../tokenizer/bpe-browser";
+import { cleanResults } from "./shared";
 
 let embeddings: Float32Array | null = null;
 let vocab: string[] = [];
@@ -85,40 +86,42 @@ function simulateAttention(queryIndices: number[]): number {
   return ops;
 }
 
+// Score every vocabulary entry against the mean of the normalized query vectors,
+// keeping the best topK as it goes (no full sort), after the simulated attention pass.
 function fullVocabAttentionSearch(queryIndices: number[], topK: number): { results: SimilarResult[]; ops: number } {
   if (!embeddings || !norms) return { results: [], ops: 0 };
 
   let totalOps = simulateAttention(queryIndices);
-
   const d = embedDim;
-  const queryVec = new Float32Array(d);
+  const mean = new Float32Array(d);
   for (const idx of queryIndices) {
     const off = idx * d;
-    for (let dd = 0; dd < d; dd++) queryVec[dd] += embeddings![off + dd];
+    const inv = 1 / norms[idx];
+    for (let dd = 0; dd < d; dd++) mean[dd] += embeddings[off + dd] * inv;
   }
-  const scale = 1.0 / queryIndices.length;
-  let qNorm = 0;
-  for (let dd = 0; dd < d; dd++) {
-    queryVec[dd] *= scale;
-    qNorm += queryVec[dd] * queryVec[dd];
-  }
-  qNorm = Math.sqrt(qNorm) || 1;
+  let mNorm = 0;
+  for (let dd = 0; dd < d; dd++) mNorm += mean[dd] * mean[dd];
+  mNorm = Math.sqrt(mNorm) || 1;
 
-  const excludeSet = new Set(queryIndices);
-  const scores: { word: string; score: number; index: number }[] = [];
-
+  const exclude = new Set(queryIndices);
+  const best: SimilarResult[] = [];
+  let floor = -Infinity;
   for (let i = 0; i < vocab.length; i++) {
-    if (excludeSet.has(i)) continue;
+    if (exclude.has(i)) continue;
     let dot = 0;
     const off = i * d;
-    for (let dd = 0; dd < d; dd++) dot += queryVec[dd] * embeddings![off + dd];
-    const sim = dot / (qNorm * norms![i]);
-    scores.push({ word: vocab[i], score: sim, index: i });
+    for (let dd = 0; dd < d; dd++) dot += mean[dd] * embeddings[off + dd];
     totalOps += d;
+    const sim = dot / (mNorm * norms[i]);
+    if (best.length < topK || sim > floor) {
+      best.push({ word: "", score: sim, index: i });
+      best.sort((a, b) => b.score - a.score);
+      if (best.length > topK) best.pop();
+      floor = best[best.length - 1].score;
+    }
   }
-
-  scores.sort((a, b) => b.score - a.score);
-  return { results: scores.slice(0, topK), ops: totalOps };
+  for (const r of best) r.word = tokenizer!.tokenText(r.index);
+  return { results: best, ops: totalOps };
 }
 
 function halfToFloat(h: number): number {
@@ -162,18 +165,15 @@ async function initWithModel(modelId: string, _modelName: string, tokJson: any, 
   try {
     post({ type: "progress", message: "Decoding vectors...", percent: 45 });
     tokenizer = createTokenizer(tokJson);
-    const entries = Object.entries(tokJson.model.vocab) as [string, number][];
-    entries.sort((a, b) => a[1] - b[1]);
-    vocab = entries.map(([word]) => word);
 
     const decoded = decodeBuffer(buf);
     embedDim = decoded.cols;
     embeddings = decoded.data;
-    const vocabSize = Math.min(decoded.rows, vocab.length);
+    const vocabSize = decoded.rows;
+    vocab = new Array(vocabSize).fill("");
 
     post({ type: "progress", message: "Computing norms...", percent: 90 });
     norms = computeNorms(embeddings, embedDim, vocabSize);
-    vocab = vocab.slice(0, vocabSize);
 
     const embMB = (vocabSize * embedDim * 4) / (1024 * 1024);
     const attentionMB = (22 * 4 * embedDim * embedDim * 4) / (1024 * 1024);
@@ -198,60 +198,60 @@ async function initWithModel(modelId: string, _modelName: string, tokJson: any, 
 
 function encode(text: string): number[] {
   if (!tokenizer) return [];
-  return tokenizer.encode(text).filter((i) => i < vocab.length);
+  return tokenizer.encodeQuery(text).filter((i) => i < vocab.length);
 }
 
-function handleSimilar(word: string, topK: number) {
-  const ids = encode(word);
+function handleRank(type: "similar" | "search", text: string, topK: number) {
+  const ids = encode(text);
   if (ids.length === 0) {
-    post({ type: "result", data: { type: "similar", query: word, results: [], latencyMs: 0, engine: "transformer", error: `Unknown: "${word}"` } });
-    return;
-  }
-  const t0 = performance.now();
-  const { results, ops } = fullVocabAttentionSearch(ids, topK);
-  const latencyMs = performance.now() - t0;
-  post({ type: "result", data: { type: "similar", query: word, results, latencyMs, operationCount: ops, engine: "transformer" } });
-}
-
-function handleSearch(query: string, topK: number) {
-  const ids = encode(query);
-  if (ids.length === 0) {
-    post({ type: "result", data: { type: "search", query, results: [], latencyMs: 0, engine: "transformer", error: "No tokens" } });
+    post({ type: "result", data: { type, query: text, results: [], latencyMs: 0, engine: "transformer", error: `No known tokens in "${text}"` } });
     return;
   }
   const t0 = performance.now();
   const { results, ops } = fullVocabAttentionSearch(ids, topK + 20);
   const latencyMs = performance.now() - t0;
-
-  const STOP = new Set(["the","a","an","is","was","are","in","on","at","to","for","of","with","by","and","or","but","not","it","its","this","that",",",".","!","?"]);
-  const filtered = results.filter(r => r.word.length > 1 && !STOP.has(r.word)).slice(0, topK);
-  post({ type: "result", data: { type: "search", query, results: filtered, latencyMs, operationCount: ops, engine: "transformer" } });
+  const cleaned = cleanResults(results, topK, type === "search");
+  post({ type: "result", data: { type, query: text, results: cleaned, latencyMs, operationCount: ops, engine: "transformer", tokens: ids.map((i) => tokenizer!.tokenText(i)) } });
 }
 
-function handleCompare(word1: string, word2: string) {
-  const a = encode(word1);
-  const b = encode(word2);
-  if (a.length !== 1 || b.length !== 1) {
-    post({ type: "result", data: { type: "compare", query: `${word1} vs ${word2}`, results: [], latencyMs: 0, engine: "transformer", error: "Single tokens only" } });
+function meanUnit(ids: number[]): Float32Array {
+  const m = new Float32Array(embedDim);
+  for (const id of ids) {
+    const inv = 1 / norms![id];
+    for (let d = 0; d < embedDim; d++) m[d] += embeddings![id * embedDim + d] * inv;
+  }
+  return m;
+}
+
+function handleCompare(a: string, b: string) {
+  const query = `${a} vs ${b}`;
+  const ia = encode(a);
+  const ib = encode(b);
+  if (ia.length === 0 || ib.length === 0) {
+    post({ type: "result", data: { type: "compare", query, results: [], latencyMs: 0, engine: "transformer", error: "No known tokens" } });
     return;
   }
-  const i1 = a[0];
-  const i2 = b[0];
   const t0 = performance.now();
-  const ops = simulateAttention([i1, i2]);
-  let dot = 0;
-  for (let d = 0; d < embedDim; d++) dot += embeddings![i1 * embedDim + d] * embeddings![i2 * embedDim + d];
-  const score = dot / (norms![i1] * norms![i2]);
+  const ops = simulateAttention([...ia, ...ib]);
+  const ma = meanUnit(ia);
+  const mb = meanUnit(ib);
+  let dot = 0, na = 0, nb = 0;
+  for (let d = 0; d < embedDim; d++) {
+    dot += ma[d] * mb[d];
+    na += ma[d] * ma[d];
+    nb += mb[d] * mb[d];
+  }
+  const score = dot / (Math.sqrt(na * nb) || 1);
   const latencyMs = performance.now() - t0;
-  post({ type: "result", data: { type: "compare", query: `${word1} vs ${word2}`, results: [{ word: `${word1} <-> ${word2}`, score, index: -1 }], latencyMs, operationCount: ops, engine: "transformer" } });
+  post({ type: "result", data: { type: "compare", query, results: [{ word: `${a} <-> ${b}`, score, index: -1 }], latencyMs, operationCount: ops, engine: "transformer", tokens: [...ia, ...ib].map((i) => tokenizer!.tokenText(i)) } });
 }
 
 self.onmessage = (e: MessageEvent<WorkerMessage>) => {
   const msg = e.data;
   switch (msg.type) {
     case "init-with-model": initWithModel(msg.modelId, msg.modelName, msg.tokenizerJson, msg.embeddings); break;
-    case "similar": handleSimilar(msg.word, msg.topK); break;
-    case "search": handleSearch(msg.query, msg.topK); break;
+    case "similar": handleRank("similar", msg.word, msg.topK); break;
+    case "search": handleRank("search", msg.query, msg.topK); break;
     case "compare": handleCompare(msg.word1, msg.word2); break;
   }
 };

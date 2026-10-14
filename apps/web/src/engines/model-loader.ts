@@ -49,8 +49,11 @@ export async function loadModel(info: ModelLoadInfo, onProgress: ProgressFn): Pr
     throw new Error(`No embedding tensor found. Available: ${keys.join(", ")}`);
   }
   const { shape, dtype, data_offsets } = header[key];
-  const [rows, cols] = shape as [number, number];
-  const [start, end] = data_offsets as [number, number];
+  const [totalRows, cols] = shape as [number, number];
+  const [start, fullEnd] = data_offsets as [number, number];
+  // The table is row major, so the first N rows are one contiguous byte range.
+  const rows = Math.min(totalRows, info.maxRows ?? totalRows);
+  const end = start + Math.round(((fullEnd - start) * rows) / totalRows);
   const dtypeCode = dtype === "F16" ? 1 : dtype === "BF16" ? 3 : dtype === "F32" ? 2 : 0;
   if (dtypeCode === 0) throw new Error(`Unsupported tensor type ${dtype}`);
 

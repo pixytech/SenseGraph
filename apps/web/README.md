@@ -1,7 +1,7 @@
 # SenseGraph web app
 
 React and Vite app that runs two engines side by side on the same embeddings:
-a baseline that simulates attention and scans the vocabulary, and CQE, which
+a baseline that simulates attention and scans the vocabulary, and SenseGraph, which
 looks neighbors up in a precomputed graph. See the repository README for the
 architecture.
 

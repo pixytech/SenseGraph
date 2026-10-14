@@ -1,6 +1,6 @@
-import type { CQEEngine } from "../bridge/wasm-loader.js";
+import type { SenseGraphEngine } from "../bridge/wasm-loader.js";
 
-export function seedGraph(engine: CQEEngine): void {
+export function seedGraph(engine: SenseGraphEngine): void {
   // --- bank: financial vs. river ---
   const bank = engine.addWord("bank");
   const bankFinancial = engine.addSense(bank, "bank.financial");

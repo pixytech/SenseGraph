@@ -1,6 +1,6 @@
 import * as readline from "readline";
 import type {
-  CQEEngine,
+  SenseGraphEngine,
   ResolveResult,
   Resolution,
   VectorStoreHandle,
@@ -96,15 +96,13 @@ function formatResult(result: ResolveResult): string {
 }
 
 export function startRepl(
-  engine: CQEEngine,
+  engine: SenseGraphEngine,
   vectors: VectorStoreHandle | null,
   tokenizer: BPETokenizer | null
 ): void {
   const stats = engine.stats();
-  console.log(`\n${BOLD}${MAGENTA}╔══════════════════════════════════════════════╗${RESET}`);
-  console.log(`${BOLD}${MAGENTA}║  SenseGraph (CQE engine) v0.2.0              ║${RESET}`);
-  console.log(`${BOLD}${MAGENTA}║  AI inference without attention               ║${RESET}`);
-  console.log(`${BOLD}${MAGENTA}╚══════════════════════════════════════════════╝${RESET}\n`);
+  console.log(`\n${BOLD}${MAGENTA}SenseGraph v0.2.0${RESET}`);
+  console.log(`${DIM}AI inference without attention layers${RESET}\n`);
   console.log(`${DIM}Graph loaded: ${stats.nodes} nodes, ${stats.edges} edges${RESET}`);
 
   if (vectors && tokenizer) {
@@ -128,7 +126,7 @@ export function startRepl(
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: `${BOLD}CQE>${RESET} `,
+    prompt: `${BOLD}SenseGraph>${RESET} `,
   });
 
   rl.prompt();

@@ -11,7 +11,9 @@ export interface EngineResult {
   latencyMs: number;
   operationCount?: number;
   memoryMB?: number;
-  engine: "transformer" | "cqe";
+  engine: "transformer" | "sensegraph";
+  tokens?: string[];
+  candidates?: number;
   error?: string;
 }
 
@@ -19,7 +21,7 @@ export interface BenchmarkSample {
   query: string;
   timestamp: number;
   transformer: { latencyMs: number; resultCount: number } | null;
-  cqe: { latencyMs: number; resultCount: number } | null;
+  sensegraph: { latencyMs: number; resultCount: number } | null;
 }
 
 export interface ModelLoadInfo {
@@ -27,6 +29,7 @@ export interface ModelLoadInfo {
   source: "huggingface" | "local";
   hfRepo?: string;
   hfFile?: string;
+  maxRows?: number;
 }
 
 export type WorkerMessage =

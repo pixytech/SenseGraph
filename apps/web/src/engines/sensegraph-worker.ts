@@ -17,13 +17,14 @@ import init, {
 } from "../../wasm-pkg/sensegraph_core.js";
 import { createTokenizer, type BPETokenizer } from "../tokenizer/bpe-browser";
 import type { WorkerMessage, WorkerResponse, SimilarResult, ModelSizeInfo } from "./types";
+import { cleanResults } from "./shared";
 import type { BuilderResponse } from "./graph-builder-worker";
 
 let storeHandle: number | null = null;
 let tokenizer: BPETokenizer | null = null;
-let vocabList: string[] = [];
 let rawEmbData: ArrayBuffer | null = null;
 let cacheTag = "model";
+let rowCount = 0;
 const NEIGHBORS_K = 20;
 const BATCH_SIZE = 500;
 
@@ -47,16 +48,16 @@ function post(msg: WorkerResponse) {
 }
 
 function graphFile(vocabSize: number, embedDim: number): string {
-  return `cqe-graph-v3-${cacheTag}-${vocabSize}-${embedDim}-k${NEIGHBORS_K}.bin`;
+  return `sensegraph-graph-v3-${cacheTag}-${vocabSize}-${embedDim}-k${NEIGHBORS_K}.bin`;
 }
 
 function progressFile(vocabSize: number, embedDim: number): string {
-  return `cqe-progress-${cacheTag}-${vocabSize}-${embedDim}-k${NEIGHBORS_K}.bin`;
+  return `sensegraph-progress-${cacheTag}-${vocabSize}-${embedDim}-k${NEIGHBORS_K}.bin`;
 }
 
 async function opfsDir(): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle("cqe-cache", { create: true });
+  return root.getDirectoryHandle("sensegraph-cache", { create: true });
 }
 
 async function opfsRead(name: string): Promise<ArrayBuffer | null> {
@@ -132,7 +133,7 @@ async function loadOrBuildGraph(vocabSize: number, embedDim: number) {
     if (cachedBytes >= expectedSize * 0.9) {
       import_neighbor_graph(storeHandle!, new Uint8Array(cached));
       const gs = neighbor_graph_size(storeHandle!);
-      post({ type: "ready", vocabSize, modelName: `CQE (${embedDim}d, ${vocabSize.toLocaleString()} words, ${gs.toLocaleString()} indexed) [OPFS cached]`, sizeInfo: getSizeInfo(vocabSize, embedDim, gs) });
+      post({ type: "ready", vocabSize, modelName: `SenseGraph (${embedDim}d, ${vocabSize.toLocaleString()} words, ${gs.toLocaleString()} indexed) [OPFS cached]`, sizeInfo: getSizeInfo(vocabSize, embedDim, gs) });
       return;
     }
 
@@ -255,7 +256,7 @@ async function buildGraphParallel(vocabSize: number, embedDim: number, startFrom
   post({
     type: "ready",
     vocabSize,
-    modelName: `CQE (${embedDim}d, ${vocabSize.toLocaleString()} words, ${gs.toLocaleString()} indexed) | Built ${totalTime.toFixed(0)}s, ${numWorkers} threads, saved ${(savedSize/1024/1024).toFixed(1)}MB to OPFS`,
+    modelName: `SenseGraph (${embedDim}d, ${vocabSize.toLocaleString()} words, ${gs.toLocaleString()} indexed) | Built ${totalTime.toFixed(0)}s, ${numWorkers} threads, saved ${(savedSize/1024/1024).toFixed(1)}MB to OPFS`,
     sizeInfo: si,
   });
 }
@@ -275,92 +276,129 @@ async function initWithModel(modelId: string, _modelName: string, tokJson: any, 
     await init({ module_or_path: `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm` });
 
     tokenizer = createTokenizer(tokJson);
-    const entries = Object.entries(tokJson.model.vocab) as [string, number][];
-    entries.sort((a, b) => a[1] - b[1]);
-    vocabList = entries.map(([w]) => w);
 
     loadEmbeddings(embeddings);
     const stats = vector_store_stats(storeHandle!);
+    rowCount = stats.count;
     await loadOrBuildGraph(stats.count, stats.embed_dim);
   } catch (err: any) {
     post({ type: "error", message: err.message || String(err) });
   }
 }
 
-function handleSimilar(word: string, topK: number) {
-  if (storeHandle === null || !tokenizer) {
-    post({ type: "result", data: { type: "similar", query: word, results: [], latencyMs: 0, engine: "cqe", error: "Engine still loading..." } });
-    return;
+function label(id: number): string {
+  return tokenizer!.tokenText(id);
+}
+
+function toResults(raw: any[]): SimilarResult[] {
+  return raw.map((r: any) => ({ word: label(r.index), score: r.score, index: r.index }));
+}
+
+function queryIds(text: string): number[] {
+  return tokenizer!.encodeQuery(text).filter((i) => i < rowCount);
+}
+
+function neighborsOf(id: number): any[] {
+  const nb = lookup_neighbors(storeHandle!, id) as any[];
+  return nb && nb.length > 0 ? nb : (query_similar(storeHandle!, id, NEIGHBORS_K) as any[]);
+}
+
+// Sum over the query tokens (with repeats) of the cosine against one vector.
+function countsOf(ids: number[]): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
+  return counts;
+}
+
+function groupNorm(counts: Map<number, number>): number {
+  let sum = 0;
+  for (const [a, ca] of counts) {
+    for (const [b, cb] of counts) {
+      sum += ca * cb * (a === b ? 1 : cosine_sim(storeHandle!, a, b));
+    }
   }
+  return Math.sqrt(Math.max(sum, 1e-12));
+}
+
+// Composes a multi token query from the precomputed neighbor lists of its tokens.
+// Candidates are the union of those lists, scored by the cosine to the mean of the
+// normalized token vectors. No pass over the whole vocabulary is needed.
+function rank(ids: number[], k: number): { results: SimilarResult[]; candidates: number } {
+  const counts = countsOf(ids);
+  if (counts.size === 1) {
+    const only = ids[0];
+    const nb = neighborsOf(only).filter((r: any) => r.index !== only).slice(0, k);
+    return { results: toResults(nb), candidates: nb.length };
+  }
+
+  const candidates = new Set<number>();
+  for (const q of counts.keys()) {
+    for (const r of neighborsOf(q)) if (!counts.has(r.index)) candidates.add(r.index);
+  }
+  if (candidates.size === 0) {
+    return { results: toResults(query_similar_multi(storeHandle!, new Uint32Array(ids), k) as any[]), candidates: 0 };
+  }
+
+  const norm = groupNorm(counts);
+  const scored: SimilarResult[] = [];
+  for (const c of candidates) {
+    let dot = 0;
+    for (const [q, n] of counts) dot += n * cosine_sim(storeHandle!, c, q);
+    scored.push({ word: label(c), score: dot / norm, index: c });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return { results: scored.slice(0, k), candidates: candidates.size };
+}
+
+function notReady(type: "similar" | "search" | "compare", query: string): boolean {
+  if (storeHandle === null || !tokenizer) {
+    post({ type: "result", data: { type, query, results: [], latencyMs: 0, engine: "sensegraph", error: "Engine still loading..." } });
+    return true;
+  }
+  return false;
+}
+
+function handleRank(type: "similar" | "search", text: string, topK: number) {
+  if (notReady(type, text)) return;
   try {
     const t0 = performance.now();
-    const ids = tokenizer.encode(word);
-
+    const ids = queryIds(text);
     if (ids.length === 0) {
-      post({ type: "result", data: { type: "similar", query: word, results: [], latencyMs: performance.now() - t0, engine: "cqe", error: `Unknown: "${word}"` } });
+      post({ type: "result", data: { type, query: text, results: [], latencyMs: performance.now() - t0, engine: "sensegraph", error: `No known tokens in "${text}"` } });
       return;
     }
-
-    let results: SimilarResult[];
-    if (ids.length === 1) {
-      const nbRaw = lookup_neighbors(storeHandle!, ids[0]) as any[];
-      if (nbRaw && nbRaw.length > 0) {
-        results = nbRaw.slice(0, topK).map((r: any) => ({
-          word: vocabList[r.index] || `<${r.index}>`, score: r.score, index: r.index,
-        }));
-      } else {
-        const raw = query_similar(storeHandle!, ids[0], topK) as any[];
-        results = raw.map((r: any) => ({
-          word: vocabList[r.index] || `<${r.index}>`, score: r.score, index: r.index,
-        }));
-      }
-    } else {
-      const raw = query_similar_multi(storeHandle!, new Uint32Array(ids), topK) as any[];
-      results = raw.map((r: any) => ({
-        word: vocabList[r.index] || `<${r.index}>`, score: r.score, index: r.index,
-      }));
-    }
-
-    post({ type: "result", data: { type: "similar", query: word, results, latencyMs: performance.now() - t0, engine: "cqe" } });
+    const { results, candidates } = rank(ids, topK + 20);
+    const cleaned = cleanResults(results, topK, type === "search");
+    post({ type: "result", data: { type, query: text, results: cleaned, latencyMs: performance.now() - t0, engine: "sensegraph", tokens: ids.map(label), candidates } });
   } catch (err: any) {
-    post({ type: "result", data: { type: "similar", query: word, results: [], latencyMs: 0, engine: "cqe", error: String(err) } });
+    post({ type: "result", data: { type, query: text, results: [], latencyMs: 0, engine: "sensegraph", error: String(err) } });
   }
 }
 
-function handleSearch(query: string, topK: number) {
-  if (storeHandle === null || !tokenizer) return;
+function handleCompare(a: string, b: string) {
+  const query = `${a} vs ${b}`;
+  if (notReady("compare", query)) return;
   const t0 = performance.now();
-  const ids = tokenizer.encode(query);
-  if (ids.length === 0) {
-    post({ type: "result", data: { type: "search", query, results: [], latencyMs: 0, engine: "cqe", error: "No tokens" } });
+  const ia = queryIds(a);
+  const ib = queryIds(b);
+  if (ia.length === 0 || ib.length === 0) {
+    post({ type: "result", data: { type: "compare", query, results: [], latencyMs: 0, engine: "sensegraph", error: "No known tokens" } });
     return;
   }
-  const raw = query_similar_multi(storeHandle!, new Uint32Array(ids), topK + 20) as any[];
-  const STOP = new Set(["the","a","an","is","was","are","in","on","at","to","for","of","with","by","and","or","but","not","it","its","this","that",",",".","!","?"]);
-  const results = raw.map((r: any) => ({ word: vocabList[r.index] || `<${r.index}>`, score: r.score, index: r.index }))
-    .filter((r: SimilarResult) => r.word.length > 1 && !STOP.has(r.word)).slice(0, topK);
-  post({ type: "result", data: { type: "search", query, results, latencyMs: performance.now() - t0, engine: "cqe" } });
-}
-
-function handleCompare(word1: string, word2: string) {
-  if (storeHandle === null || !tokenizer) return;
-  const t0 = performance.now();
-  const ids1 = tokenizer.encode(word1);
-  const ids2 = tokenizer.encode(word2);
-  if (ids1.length !== 1 || ids2.length !== 1) {
-    post({ type: "result", data: { type: "compare", query: `${word1} vs ${word2}`, results: [], latencyMs: 0, engine: "cqe", error: "Single tokens only" } });
-    return;
-  }
-  const score = cosine_sim(storeHandle!, ids1[0], ids2[0]);
-  post({ type: "result", data: { type: "compare", query: `${word1} vs ${word2}`, results: [{ word: `${word1} <-> ${word2}`, score, index: -1 }], latencyMs: performance.now() - t0, engine: "cqe" } });
+  const ca = countsOf(ia);
+  const cb = countsOf(ib);
+  let cross = 0;
+  for (const [x, nx] of ca) for (const [y, ny] of cb) cross += nx * ny * (x === y ? 1 : cosine_sim(storeHandle!, x, y));
+  const score = cross / (groupNorm(ca) * groupNorm(cb));
+  post({ type: "result", data: { type: "compare", query, results: [{ word: `${a} <-> ${b}`, score, index: -1 }], latencyMs: performance.now() - t0, engine: "sensegraph", tokens: [...ia, ...ib].map(label) } });
 }
 
 self.onmessage = (e: MessageEvent<WorkerMessage>) => {
   const msg = e.data;
   switch (msg.type) {
     case "init-with-model": initWithModel(msg.modelId, msg.modelName, msg.tokenizerJson, msg.embeddings); break;
-    case "similar": handleSimilar(msg.word, msg.topK); break;
-    case "search": handleSearch(msg.query, msg.topK); break;
+    case "similar": handleRank("similar", msg.word, msg.topK); break;
+    case "search": handleRank("search", msg.query, msg.topK); break;
     case "compare": handleCompare(msg.word1, msg.word2); break;
   }
 };

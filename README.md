@@ -1,6 +1,6 @@
 # SenseGraph
 
-**AI inference without attention layers.** SenseGraph is built on CQE, the Compositional Query Engine. CQE extracts the embedding layer from pre-trained language models (GPT, LLaMA, Qwen, etc.) and replaces the expensive O(n²) attention mechanism with pre-computed graph lookups - delivering the same semantic results at a fraction of the computational cost.
+**AI inference without attention layers.** SenseGraph extracts the embedding layer from pre-trained language models (GPT, LLaMA, Qwen, etc.) and replaces the expensive O(n²) attention mechanism with pre-computed graph lookups - delivering the same semantic results at a fraction of the computational cost.
 
 ## The Core Idea
 
@@ -10,7 +10,7 @@ Modern AI models like GPT and LLaMA have two main components:
 
 2. **Attention layers** (22-96 layers) - compute pairwise interactions between all tokens in the input. This is where 99% of the computation happens. For each query, attention performs O(n² × d) operations per layer.
 
-**CQE's hypothesis:** For many tasks (similarity search, word sense disambiguation, semantic retrieval), the embedding layer alone contains sufficient knowledge. The attention layers are an expensive way to arrive at the same answer that a pre-computed graph index provides.
+**The hypothesis:** For many tasks (similarity search, word sense disambiguation, semantic retrieval), the embedding layer alone contains sufficient knowledge. The attention layers are an expensive way to arrive at the same answer that a pre-computed graph index provides.
 
 ## How It Works
 
@@ -19,22 +19,22 @@ Traditional Transformer:
   Input -> Embedding -> [Attention × 22 layers] -> [FFN × 22 layers] -> Output
   Cost: ~1,126,400 multiply-adds for 5 tokens
 
-CQE Engine:
+SenseGraph Engine:
   Input -> Embedding -> [Graph Lookup] -> Output
   Cost: ~15,000 multiply-adds for 5 tokens (75x fewer)
 ```
 
 ### Step 1: Extract Embeddings
 
-CQE downloads only the embedding layer from a pre-trained model (e.g., the `model.embed_tokens.weight` tensor from TinyLlama). This is typically 128-256 MB out of a 2-5 GB model.
+SenseGraph downloads only the embedding layer from a pre-trained model (e.g., the `model.embed_tokens.weight` tensor from TinyLlama). This is typically 128-256 MB out of a 2-5 GB model.
 
 ### Step 2: Build Neighbor Graph (one-time)
 
-For each word in the vocabulary, CQE pre-computes its K nearest neighbors using cosine similarity. This creates a graph index where every word has instant O(1) access to its most semantically similar words. This step runs once per model and is cached.
+For each word in the vocabulary, SenseGraph pre-computes its K nearest neighbors using cosine similarity. This creates a graph index where every word has instant O(1) access to its most semantically similar words. This step runs once per model and is cached.
 
 ### Step 3: Query via Graph Lookup
 
-When you search for "king", instead of running 22 attention layers, CQE simply looks up the pre-computed neighbors: queen, prince, monarch, throne, crown - in under 1 millisecond.
+When you look up a token such as "fetch", instead of running 22 attention layers, SenseGraph simply reads the pre-computed neighbors of that token, typically in well under a millisecond. For a phrase it combines the neighbor lists of its tokens.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ When you search for "king", instead of running 22 attention layers, CQE simply l
 SenseGraph/
   apps/
     cli/          Node.js REPL, loads the engine as WASM
-    web/          React benchmark app, baseline vs CQE side by side
+    web/          React benchmark app, baseline vs SenseGraph side by side
   libs/
     core/         Rust engine (sensegraph-core), compiled to WASM
   tools/
@@ -88,37 +88,52 @@ commands. A plain sentence is resolved word by word.
 
 ```mermaid
 flowchart LR
-  UI["React UI<br/>useEngine hook"] -->|typed messages| CW[cqe-worker]
+  UI["React UI<br/>useEngine hook"] -->|typed messages| CW[sensegraph-worker]
   UI -->|typed messages| TW[transformer-worker]
   CW --> WASM["sensegraph-core WASM"]
   CW -->|spawns up to 8| GB[graph-builder-workers]
   GB --> WASM
   CW <--> OPFS[("OPFS cache<br/>neighbor graph and checkpoints")]
-  CW --> SRC[("Embeddings<br/>built-in subset, Hugging Face, local file")]
+  CW --> SRC[("Embeddings<br/>Hugging Face model, downloaded once")]
   TW --> SRC
 ```
 
-- **cqe-worker** loads the WASM module, the tokenizer and the embeddings, then
-  either restores the neighbor graph from OPFS or builds it with up to 8
+- **sensegraph-worker** loads the WASM module, the tokenizer and the embeddings,
+  then either restores the neighbor graph from OPFS or builds it with up to 8
   parallel graph-builder workers (K = 20, batches of 500). Progress is
   checkpointed to OPFS, so an interrupted build resumes where it stopped. A
-  single-word query is one neighbor lookup. Multi-word queries average the word
-  vectors and run a weighted top-K search.
+  single-token query is one neighbor lookup. A multi-token query takes the union
+  of the neighbor lists of its tokens as candidates and scores only those against
+  the mean of the normalized token vectors.
 - **transformer-worker** is the baseline. For each query it simulates one
   attention pass over the query tokens (Q, K and V from the embeddings, scaled
   dot-product scores, softmax, weighted sum), then scans the whole vocabulary
-  with cosine similarity. It reports the arithmetic operations it performed.
-- **Model sources**: pick a model from the dropdown. The app reads the
-  safetensors header from Hugging Face and then fetches only the embedding
-  tensor with HTTP range requests, so nothing is bundled with the site.
-- The UI shows both engines side by side, a continuous benchmark with live
-  latency charts, and architecture diagrams.
+  against the same mean vector, keeping the best K. It reports the arithmetic
+  operations it performed.
+- **Models**: pick a model from the dropdown. Code models (Qwen2.5-Coder) are
+  listed first and are the default; general models are also available. The app
+  reads the safetensors header from Hugging Face and fetches only the embedding
+  rows it uses with HTTP range requests, so nothing is bundled with the site. For
+  models with a very large vocabulary only the first 50,000 tokens (the most
+  frequent ones) are indexed.
+- **Tokenizers**: byte level BPE (Qwen, SmolLM), SentencePiece style BPE
+  (TinyLlama, Phi) and plain word lists are supported, so every model in the
+  dropdown tokenizes its input correctly.
+- **Query types**: intent search for a phrase, related tokens, and compare two
+  terms. Example queries adapt to the model type (code or general).
+- **Complex task suite**: twelve longer multi-token queries run through both
+  engines, each timed three times. For every query the input tokens, both
+  engines' top results, the top-10 overlap and the speedup are shown.
+- A continuous benchmark with live latency charts and architecture diagrams.
 
 ### How to read the benchmark
 
 The selected model is downloaded once in the page. The same tokenizer and
 embedding tensor are then handed to both engines, so they process identical
-input and, for single-token similarity, return matching results. The neighbor
+input and are asked for the same ranking. Single-token queries should match
+exactly. For multi-token queries SenseGraph only scores candidates taken from
+neighbor lists, so the page reports the top-10 overlap with the exact scan
+instead of assuming it is 100%. The neighbor
 graph cached in OPFS is keyed by model, so switching models never reuses another
 model's graph. The comparison measures a precomputed neighbor lookup against a
 brute-force scan of the vocabulary plus a simulated attention step. It does not
@@ -129,12 +144,12 @@ model, not a measurement of a real model.
 
 Figures from an earlier run with a 50K word GloVe vocabulary (300 dimensions); they will differ per model:
 
-| Metric | Transformer | CQE Engine |
+| Metric | Transformer | SenseGraph Engine |
 |--------|-------------|------------|
 | Query latency | ~50 ms | **< 1 ms** |
 | Speedup | 1x | **50-100x** |
 | Model size (with attention) | 87.4 MB | - |
-| Model size (CQE graph) | - | **64.8 MB** |
+| Model size (SenseGraph graph) | - | **64.8 MB** |
 | Attention layers needed | 22 | **0** |
 | Results quality | Baseline | **Identical** |
 
@@ -158,21 +173,21 @@ The results are identical because both engines use the same embeddings - the onl
 
 ## Cons of Removing Attention
 
-1. **No contextual understanding** - attention's key feature is that word meaning changes based on surrounding words. "Bank" means different things in "river bank" vs "bank account." Without attention, CQE relies on the static embedding (single meaning per word). The word-sense disambiguation module partially addresses this with graph-based context indicators, but it's less powerful than full attention.
+1. **No contextual understanding** - attention's key feature is that word meaning changes based on surrounding words. "Bank" means different things in "river bank" vs "bank account." Without attention, SenseGraph relies on the static embedding (single meaning per word). The word-sense disambiguation module partially addresses this with graph-based context indicators, but it's less powerful than full attention.
 
-2. **No text generation** - transformers generate text token-by-token using attention to maintain coherence. CQE can retrieve and rank, but cannot generate novel text. It's a search engine, not a language model.
+2. **No text generation** - transformers generate text token-by-token using attention to maintain coherence. SenseGraph can retrieve and rank, but cannot generate novel text. It's a search engine, not a language model.
 
-3. **No sequence understanding** - attention captures word order and long-range dependencies ("The cat sat on the mat" vs "The mat sat on the cat"). CQE treats words as independent vectors - it understands meaning but not grammar or structure.
+3. **No sequence understanding** - attention captures word order and long-range dependencies ("The cat sat on the mat" vs "The mat sat on the cat"). SenseGraph treats words as independent vectors - it understands meaning but not grammar or structure.
 
 4. **One-time build cost** - the neighbor graph must be computed once per model. For 50K words this takes ~3 minutes with 8 threads. For larger vocabularies (100K+), this could take 30+ minutes. GPU acceleration (WebGPU compute shaders) would solve this.
 
 5. **Fixed vocabulary** - the graph only covers words seen during embedding training. Out-of-vocabulary words require fallback to brute-force search or sub-word decomposition.
 
-6. **Approximation for multi-word queries** - when searching for phrases, CQE averages the constituent word embeddings. This loses compositional meaning ("hot dog" ≠ average of "hot" + "dog"). Attention handles this naturally through cross-token interactions.
+6. **Approximation for multi-word queries** - when searching for phrases, SenseGraph averages the constituent word embeddings. This loses compositional meaning ("hot dog" ≠ average of "hot" + "dog"). Attention handles this naturally through cross-token interactions.
 
-## When to Use CQE Instead of Transformers
+## When to Use SenseGraph Instead of Transformers
 
-| Use Case | CQE | Transformer |
+| Use Case | SenseGraph | Transformer |
 |----------|-----|-------------|
 | Word similarity / analogies | Excellent | Overkill |
 | Semantic search | Excellent | Good but slow |
@@ -183,7 +198,7 @@ The results are identical because both engines use the same embeddings - the onl
 | Translation | Not possible | Required |
 | Summarization | Not possible | Required |
 
-**CQE is best for:** retrieval, search, similarity, classification, and any task where you need to find the closest match in a vocabulary - fast, offline, and without GPU.
+**SenseGraph is best for:** retrieval, search, similarity, classification, and any task where you need to find the closest match in a vocabulary - fast, offline, and without GPU.
 
 **Transformers are still needed for:** anything that requires understanding word order, generating text, or reasoning about novel combinations of concepts.
 
@@ -208,20 +223,13 @@ npm start
 ```
 
 ```
-CQE> similar king
-  1. queen          0.6336
-  2. prince         0.6197
-  3. monarch        0.5900
-  ...
-
-CQE> compare king queen
-  king <-> queen  0.6336
-
-CQE> search capital of france
-  1. french         0.6272
-  2. paris          0.5645
-  ...
+SenseGraph> similar <token>
+SenseGraph> compare <token> <token>
+SenseGraph> search <phrase>
 ```
+
+The results depend on the model whose embeddings were extracted.
+
 
 ### Browser benchmark
 
@@ -258,12 +266,15 @@ Actions, and add this repository to the Pixytech Portal GitHub App.
 
 ## Supported Models
 
-| Model | Source | Embedding Size | Status |
-|-------|--------|---------------|--------|
-| SmolLM2 135M | Hugging Face | ~270 MB | Default in the dropdown |
-| SmolLM2 360M | Hugging Face | ~720 MB | Available |
-| Qwen 2.5 0.5B | Hugging Face | ~1 GB | Available |
-| TinyLlama 1.1B | Hugging Face | ~2.2 GB file, embedding tensor only is fetched | Available, also used by `npm run extract` |
+| Model | Type | Embedding download | Tokenizer |
+|-------|------|--------------------|-----------|
+| Qwen2.5-Coder 0.5B (default) | Code | ~90 MB (first 50K tokens) | byte level BPE |
+| Qwen2.5-Coder 1.5B | Code | ~155 MB (first 50K tokens) | byte level BPE |
+| SmolLM2 135M | General | ~57 MB | byte level BPE |
+| SmolLM2 360M | General | ~95 MB | byte level BPE |
+| Qwen 2.5 0.5B | General | ~90 MB (first 50K tokens) | byte level BPE |
+| TinyLlama 1.1B Chat | General | ~130 MB | SentencePiece BPE |
+| Phi 3.5 Mini | General | ~200 MB | SentencePiece BPE |
 
 ## Technology Stack
 
@@ -278,6 +289,6 @@ Actions, and add this repository to the Pixytech Portal GitHub App.
 
 - **WebGPU compute shaders** for graph building (100x faster than CPU)
 - **Real LLM embedding extraction** from safetensors format
-- **Hybrid mode** - use CQE for retrieval, small transformer for reranking
+- **Hybrid mode** - use SenseGraph for retrieval, small transformer for reranking
 - **Auto-learning context indicators** from text corpora
 - **Streaming model loading** for 5GB+ models

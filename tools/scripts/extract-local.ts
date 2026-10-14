@@ -16,7 +16,7 @@ function findSafetensors(): string | null {
 }
 
 function main() {
-  console.log("CQE Local Embedding Extractor\n");
+  console.log("SenseGraph Local Embedding Extractor\n");
 
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
