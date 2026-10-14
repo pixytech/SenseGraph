@@ -1,0 +1,28 @@
+{
+  "name": "sensegraph",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Compositional Query Engine: AI inference without attention layers",
+  "license": "ISC",
+  "author": "Rajnish Noonia",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "nx run-many -t build",
+    "test": "nx run-many -t test",
+    "typecheck": "nx run-many -t typecheck",
+    "dev": "nx run web:dev",
+    "start": "nx run cli:start",
+    "wasm:node": "nx run core:build-wasm-node",
+    "wasm:web": "nx run core:build-wasm-web",
+    "extract": "tsx tools/scripts/extract-embeddings.ts",
+    "extract:local": "tsx tools/scripts/extract-local.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "nx": "^22.0.0",
+    "tsx": "^4.23.15"
+  }
+}

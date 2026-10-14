@@ -1,0 +1,38 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "cli",
+  "projectType": "application",
+  "sourceRoot": "apps/cli/src",
+  "tags": [
+    "node"
+  ],
+  "targets": {
+    "start": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx tsx src/index.ts",
+        "cwd": "apps/cli"
+      },
+      "dependsOn": [
+        "core:build-wasm-node"
+      ]
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx vitest run",
+        "cwd": "apps/cli"
+      },
+      "dependsOn": [
+        "core:build-wasm-node"
+      ]
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx tsc --noEmit",
+        "cwd": "apps/cli"
+      }
+    }
+  }
+}

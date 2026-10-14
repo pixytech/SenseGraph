@@ -1,0 +1,61 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "core",
+  "projectType": "library",
+  "sourceRoot": "libs/core/src",
+  "tags": [
+    "rust",
+    "wasm"
+  ],
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "cargo test",
+        "cwd": "libs/core"
+      },
+      "inputs": [
+        "{projectRoot}/Cargo.toml",
+        "{projectRoot}/Cargo.lock",
+        "{projectRoot}/src/**/*",
+        "{projectRoot}/tests/**/*"
+      ]
+    },
+    "build-wasm-node": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "wasm-pack build --target nodejs --out-dir ../../apps/cli/wasm-pkg",
+        "cwd": "libs/core"
+      },
+      "outputs": [
+        "{workspaceRoot}/apps/cli/wasm-pkg"
+      ],
+      "inputs": [
+        "{projectRoot}/Cargo.toml",
+        "{projectRoot}/Cargo.lock",
+        "{projectRoot}/src/**/*",
+        "{projectRoot}/tests/**/*"
+      ]
+    },
+    "build-wasm-web": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "wasm-pack build --target web --out-dir ../../apps/web/wasm-pkg && node ../../tools/copy-wasm.mjs",
+        "cwd": "libs/core",
+        "env": {
+          "RUSTFLAGS": "-C target-feature=+simd128"
+        }
+      },
+      "outputs": [
+        "{workspaceRoot}/apps/web/wasm-pkg",
+        "{workspaceRoot}/apps/web/public/sensegraph_core_bg.wasm"
+      ],
+      "inputs": [
+        "{projectRoot}/Cargo.toml",
+        "{projectRoot}/Cargo.lock",
+        "{projectRoot}/src/**/*",
+        "{projectRoot}/tests/**/*"
+      ]
+    }
+  }
+}

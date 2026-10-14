@@ -1,0 +1,19 @@
+node_modules
+dist
+.nx
+*.tsbuildinfo
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+
+# Rust
+libs/core/target
+
+# Generated engine builds
+apps/cli/wasm-pkg
+apps/web/wasm-pkg
+apps/web/public/sensegraph_core_bg.wasm
+
+# Embeddings and tokenizers are downloaded or generated, not committed
+data
+apps/web/public/data

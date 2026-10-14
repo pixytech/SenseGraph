@@ -1,0 +1,48 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "web",
+  "projectType": "application",
+  "sourceRoot": "apps/web/src",
+  "tags": [
+    "web"
+  ],
+  "targets": {
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx vite",
+        "cwd": "apps/web"
+      },
+      "dependsOn": [
+        "core:build-wasm-web"
+      ]
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx tsc -b && npx vite build",
+        "cwd": "apps/web"
+      },
+      "outputs": [
+        "{workspaceRoot}/apps/web/dist"
+      ],
+      "dependsOn": [
+        "core:build-wasm-web"
+      ]
+    },
+    "preview": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx vite preview",
+        "cwd": "apps/web"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx oxlint",
+        "cwd": "apps/web"
+      }
+    }
+  }
+}

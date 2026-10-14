@@ -1,0 +1,8 @@
+{
+  "title": "SenseGraph",
+  "description": "Attention-free semantic search: Rust and WASM engine with a live benchmark.",
+  "icon": "SG",
+  "color": "#06b6d4",
+  "order": 25,
+  "access": "private"
+}

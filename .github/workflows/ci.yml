@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Rust wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      # No lockfile is committed yet. After running npm install locally and
+      # committing package-lock.json, switch to npm ci and add cache: npm to
+      # the setup-node step.
+      - run: npm install
+      - name: Test, typecheck and build every project
+        run: npx nx run-many -t test typecheck build

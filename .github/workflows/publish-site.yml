@@ -1,0 +1,47 @@
+# Builds the web app and force-pushes it to this repo's `site` branch. The
+# Pixytech portal serves that branch at /apps/sensegraph/ to signed-in people in the
+# app-sensegraph team. Nothing here is public.
+name: Publish site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-site
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      BASE_PATH: /apps/sensegraph/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Rust wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      # No lockfile is committed yet. After running npm install locally and
+      # committing package-lock.json, switch to npm ci and add cache: npm to
+      # the setup-node step.
+      - run: npm install
+      # Models are loaded from the dropdown at runtime, so no data is baked in.
+      - name: Build the web app
+        run: npx nx build web
+      # One commit, force-pushed, so old builds do not pile up in history.
+      - name: Push to site branch
+        working-directory: apps/web/dist
+        run: |
+          git init -q -b site
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Site build from ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" site
