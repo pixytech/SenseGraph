@@ -231,7 +231,7 @@ async function buildGraphParallel(vocabSize: number, embedDim: number, startFrom
       worker.postMessage(
         {
           type: "init",
-          wasmUrl: `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm`,
+          wasmUrl: `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm?v=${__WASM_VERSION__}`,
           embData: embCopy,
           vocabSize, embedDim, rangeStart, rangeEnd,
           k: NEIGHBORS_K, batchSize: BATCH_SIZE,
@@ -274,7 +274,7 @@ async function initWithModel(modelId: string, _modelName: string, tokJson: any, 
   try {
     cacheTag = modelId.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
     post({ type: "progress", message: "Loading WASM...", percent: 42 });
-    await init({ module_or_path: `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm` });
+    await init({ module_or_path: `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm?v=${__WASM_VERSION__}` });
 
     tokenizer = createTokenizer(tokJson);
 

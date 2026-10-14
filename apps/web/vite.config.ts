@@ -5,6 +5,11 @@ import { defineConfig } from "vite";
 export default defineConfig({
   base: process.env.BASE_PATH || "/",
   plugins: [react()],
+  // The engine binary is served from a fixed file name, so its URL carries a build id.
+  // Without it a browser can pair a new script with a cached older binary.
+  define: {
+    __WASM_VERSION__: JSON.stringify(Date.now().toString(36)),
+  },
   worker: {
     format: "es",
   },
