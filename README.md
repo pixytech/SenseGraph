@@ -172,7 +172,7 @@ The overlap compares the graph with an exact scan of the same vectors, so it sho
 
 Each limitation is listed with its status in this repository.
 
-1. **No contextual understanding.** Attention lets a word's meaning change with its neighbors ("bank" in "river bank" versus "bank account"). SenseGraph uses one static vector per token, so both senses share a vector. There is no word-sense disambiguation module in this repository. Direction: a hybrid mode with a small transformer for reranking, and graphs derived from deeper layers of a model, which carry some context.
+1. **No contextual understanding.** Attention lets a word's meaning change with its neighbors ("bank" in "river bank" versus "bank account"). SenseGraph uses one static vector per token, so both senses share a vector. The Rust core and the CLI include a rule-based sense resolver that picks a sense of an ambiguous word from context indicator words (for example "river" versus "money" around "bank"). It only works for the few words whose senses and indicators are added by hand (see `apps/cli/src/knowledge/seed.ts`), it is not used by the web benchmark, and it is much weaker than attention. Direction: learn the indicators from text instead of hand-seeding them, a hybrid mode with a small transformer for reranking, and graphs derived from deeper layers of a model, which carry some context.
 
 2. **No text generation.** The engine retrieves and ranks. It is a search engine over embeddings, not a language model, and it does not generate text.
 
@@ -193,7 +193,7 @@ Each limitation is listed with its status in this repository.
 | Word similarity / analogies | Good | Overkill |
 | Semantic search over short queries | Good | Good but slower |
 | Document retrieval / ranking | Plausible, untested | Better for complex queries |
-| Word sense disambiguation | Limited, no context | Better (with attention) |
+| Word sense disambiguation | Limited: hand-seeded rules in the CLI only | Better (with attention) |
 | Text generation | Not possible | Required |
 | Chatbots / conversation | Not possible | Required |
 | Translation | Not possible | Required |
@@ -303,4 +303,4 @@ Status is as of this version.
 | WebGPU compute for the graph build | Not started. Speedup over CPU is a goal, not a measurement. |
 | Approximate nearest-neighbor index for the build | Not started. Would reduce the quadratic build cost. |
 | Batched candidate scoring in the Rust core | Not started. A phrase query currently makes about a thousand small WASM calls. |
-| Learning context indicators from text corpora | Not started. |
+| Learning context indicators from text corpora | Not started. Today they are added by hand for a few words in the CLI. |
