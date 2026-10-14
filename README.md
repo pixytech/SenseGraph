@@ -1,40 +1,40 @@
 # SenseGraph
 
-**AI inference without attention layers.** SenseGraph extracts the embedding layer from pre-trained language models (GPT, LLaMA, Qwen, etc.) and replaces the expensive O(n²) attention mechanism with pre-computed graph lookups - delivering the same semantic results at a fraction of the computational cost.
+**An idea path for cutting inference cost: can a graph computed once from an existing model replace some of the work attention does at query time?** SenseGraph takes the embedding table of a pre-trained language model, precomputes a nearest-neighbor graph over it, and answers retrieval-style queries by graph lookup instead of a full vocabulary scan. This repository is the first working demo of that idea, and it is explicit about what it does and does not show yet.
 
 ## The Core Idea
 
-Modern AI models like GPT and LLaMA have two main components:
+Modern language models have two main parts:
 
-1. **Embedding layer** - a lookup table mapping each token to a high-dimensional vector. This is where the model's learned knowledge lives (word relationships, semantic similarity, analogies).
+1. **Embedding layer** - a lookup table mapping each token to a high-dimensional vector. Much of what the model learned about which tokens relate to each other is stored here.
 
-2. **Attention layers** (22-96 layers) - compute pairwise interactions between all tokens in the input. This is where 99% of the computation happens. For each query, attention performs O(n² × d) operations per layer.
+2. **Attention layers** (22 to 96 in typical models) - compute pairwise interactions between all tokens in the input, costing O(n^2 x d) per layer at query time. This is where most of the inference compute, and so most of the GPU use, goes.
 
-**The hypothesis:** For many tasks (similarity search, word sense disambiguation, semantic retrieval), the embedding layer alone contains sufficient knowledge. The attention layers are an expensive way to arrive at the same answer that a pre-computed graph index provides.
+**The hypothesis:** for some tasks, such as similarity and semantic retrieval, the embedding layer already holds enough knowledge, and structure computed once from it (a neighbor graph) can answer queries more cheaply than computing attention and scanning the vocabulary on every query. This is a hypothesis. The demo tests the narrowest version of it, nearest-token and phrase retrieval over static embeddings. See "Limitations" and "Future directions" for what is not covered.
 
 ## How It Works
 
 ```
-Traditional Transformer:
-  Input -> Embedding -> [Attention × 22 layers] -> [FFN × 22 layers] -> Output
-  Cost: ~1,126,400 multiply-adds for 5 tokens
+Conventional path (per query):
+  Input -> Tokenize -> [Attention layers] -> scan whole vocabulary -> Top K
 
-SenseGraph Engine:
-  Input -> Embedding -> [Graph Lookup] -> Output
-  Cost: ~15,000 multiply-adds for 5 tokens (75x fewer)
+SenseGraph path (graph built once, then per query):
+  Input -> Tokenize -> neighbor graph lookup -> score a few candidates -> Top K
 ```
+
+In the demo the baseline is a simulated single attention pass followed by a full vocabulary scan. It is a cost model, not a real multi-layer forward pass.
 
 ### Step 1: Extract Embeddings
 
-SenseGraph downloads only the embedding layer from a pre-trained model (e.g., the `model.embed_tokens.weight` tensor from TinyLlama). This is typically 128-256 MB out of a 2-5 GB model.
+The app reads the safetensors header of a Hugging Face model and downloads only the embedding rows it needs with HTTP range requests, together with the tokenizer. That is roughly 57 MB for SmolLM2 135M and about 90 MB for the first 50K tokens of a Qwen model, not the whole multi-gigabyte file.
 
 ### Step 2: Build Neighbor Graph (one-time)
 
-For each word in the vocabulary, SenseGraph pre-computes its K nearest neighbors using cosine similarity. This creates a graph index where every word has instant O(1) access to its most semantically similar words. This step runs once per model and is cached.
+For each token in the vocabulary, SenseGraph precomputes its 20 nearest neighbors by cosine similarity. A single-token query then needs one lookup. The build runs once per model, in parallel web workers, and is cached.
 
 ### Step 3: Query via Graph Lookup
 
-When you look up a token such as "fetch", instead of running 22 attention layers, SenseGraph simply reads the pre-computed neighbors of that token, typically in well under a millisecond. For a phrase it combines the neighbor lists of its tokens.
+A single token is answered by reading its precomputed neighbors. For a phrase, the neighbor lists of its tokens form the candidate set, and only those candidates are scored against the mean of the normalized token vectors.
 
 ## Architecture
 
@@ -142,65 +142,66 @@ model, not a measurement of a real model.
 
 ## Benchmark Results
 
-Figures from an earlier run with a 50K word GloVe vocabulary (300 dimensions); they will differ per model:
+Measured in the live app with SmolLM2 135M (49,152 tokens, 576 dimensions) and 8 worker threads. Results differ per model and machine.
 
-| Metric | Transformer | SenseGraph Engine |
+| Metric | Baseline (simulated attention + scan) | SenseGraph |
 |--------|-------------|------------|
-| Query latency | ~50 ms | **< 1 ms** |
-| Speedup | 1x | **50-100x** |
-| Model size (with attention) | 87.4 MB | - |
-| Model size (SenseGraph graph) | - | **64.8 MB** |
-| Attention layers needed | 22 | **0** |
-| Results quality | Baseline | **Identical** |
+| Average over 48 mixed queries | 59.3 ms | 1.4 ms |
+| 95th percentile | 96.4 ms | 3.7 ms |
+| Speedup over the run | 1x | about 43x |
+| Top 10 overlap with the exact scan | reference | 100% on the queries checked |
+| One-time graph build | - | 114 s, 7.5 MB graph |
 
-The results are identical because both engines use the same embeddings - the only difference is the algorithm used to find similar words.
+The overlap compares the graph with an exact scan of the same vectors, so it shows the graph is a faithful shortcut for retrieval. It does not show that results match a real model's outputs. The speedup comes from precomputation, not from the browser: the same approach would run in Node, natively or on a server.
 
-## Pros of Removing Attention
+## Strengths
 
-1. **Dramatically faster inference** - O(1) graph lookup vs O(n² × d × L) attention computation. 50-100x speedup for similarity tasks.
+1. **Much faster retrieval** - a graph lookup plus scoring a small candidate set, against a vocabulary scan. About 43x on average in the run above, against a simulated baseline.
 
-2. **No GPU required** - the graph lookup runs on CPU in WASM. No CUDA, no GPU memory, no driver issues. Runs in any browser.
+2. **No GPU needed for the lookup** - it runs on CPU in WASM, with no CUDA, no GPU memory and no drivers, in any modern browser.
 
-3. **Smaller model size** - only the embedding layer is needed (128-256 MB), not the full model (2-5 GB). The pre-computed graph adds only ~8 MB.
+3. **Small footprint** - only the embedding rows are downloaded, and the graph adds a few megabytes (7.5 MB for SmolLM2 135M).
 
-4. **Predictable latency** - every query takes the same time (a hash lookup). No variable-length attention computation that depends on input length.
+4. **Predictable latency for single tokens** - a single-token query is one lookup, independent of input length.
 
-5. **Works offline** - once the graph is built and cached (in OPFS), no network access needed. The model runs entirely in the browser.
+5. **Works offline** - once the model rows and graph are cached in the browser (OPFS), no network is needed.
 
-6. **Parallelizable graph building** - the one-time graph construction can use multiple CPU cores (8 web workers) for ~3 minute builds on 50K vocabulary.
+6. **Parallel, resumable build** - the graph is built by 8 workers and checkpoints to OPFS, so an interrupted build resumes.
 
-7. **Resumable** - graph building checkpoints to OPFS. If interrupted, it resumes from where it left off.
+## Limitations
 
-## Cons of Removing Attention
+Each limitation is listed with its status in this repository.
 
-1. **No contextual understanding** - attention's key feature is that word meaning changes based on surrounding words. "Bank" means different things in "river bank" vs "bank account." Without attention, SenseGraph relies on the static embedding (single meaning per word). The word-sense disambiguation module partially addresses this with graph-based context indicators, but it's less powerful than full attention.
+1. **No contextual understanding.** Attention lets a word's meaning change with its neighbors ("bank" in "river bank" versus "bank account"). SenseGraph uses one static vector per token, so both senses share a vector. There is no word-sense disambiguation module in this repository. Direction: a hybrid mode with a small transformer for reranking, and graphs derived from deeper layers of a model, which carry some context.
 
-2. **No text generation** - transformers generate text token-by-token using attention to maintain coherence. SenseGraph can retrieve and rank, but cannot generate novel text. It's a search engine, not a language model.
+2. **No text generation.** The engine retrieves and ranks. It is a search engine over embeddings, not a language model, and it does not generate text.
 
-3. **No sequence understanding** - attention captures word order and long-range dependencies ("The cat sat on the mat" vs "The mat sat on the cat"). SenseGraph treats words as independent vectors - it understands meaning but not grammar or structure.
+3. **No word order.** A phrase is scored against the mean of its tokens' normalized vectors, so "the cat sat on the mat" and "the mat sat on the cat" score identically. Direction: phrase or n-gram nodes in the graph, and positional weighting.
 
-4. **One-time build cost** - the neighbor graph must be computed once per model. For 50K words this takes ~3 minutes with 8 threads. For larger vocabularies (100K+), this could take 30+ minutes. GPU acceleration (WebGPU compute shaders) would solve this.
+4. **One-time build cost.** The graph is built once per model: 114 s for 49,152 tokens at 576 dimensions on 8 workers. The all-pairs search grows roughly with the square of the vocabulary size and linearly with the embedding dimension, so a vocabulary twice the size would take about four times as long, an estimate that has not been measured. The app caps large vocabularies at the first 50,000 tokens to keep the build practical. Direction: WebGPU compute for the build, or an approximate nearest-neighbor index in place of the exact all-pairs search.
 
-5. **Fixed vocabulary** - the graph only covers words seen during embedding training. Out-of-vocabulary words require fallback to brute-force search or sub-word decomposition.
+5. **Vocabulary coverage.** The byte-level BPE tokenizers cover any input through byte fallback, so there is no true out-of-vocabulary failure, but a rare word is split into sub-word tokens whose vectors are averaged. For models with vocabularies above 50,000 tokens, only the first 50,000 rows are indexed, so tokens beyond that are not searchable. Direction: a larger cap with a faster build.
 
-6. **Approximation for multi-word queries** - when searching for phrases, SenseGraph averages the constituent word embeddings. This loses compositional meaning ("hot dog" ≠ average of "hot" + "dog"). Attention handles this naturally through cross-token interactions.
+6. **Phrase queries are an approximation.** Averaging constituent vectors loses compositional meaning ("hot dog" is not the average of "hot" and "dog"), and because only candidates from the tokens' neighbor lists are scored, an exact scan could in principle find something the graph misses. The app reports the top 10 overlap with the exact scan for every query so this can be checked.
+
+7. **Not yet compared with real model outputs.** The baseline is a cost model, and the overlap is measured against the same embedding table. A comparison against real model outputs or a standard retrieval benchmark has not been done, and neither has a measurement of real GPU savings.
 
 ## When to Use SenseGraph Instead of Transformers
 
 | Use Case | SenseGraph | Transformer |
 |----------|-----|-------------|
-| Word similarity / analogies | Excellent | Overkill |
-| Semantic search | Excellent | Good but slow |
-| Document retrieval / ranking | Good | Better for complex queries |
-| Word sense disambiguation | Good (with graph) | Better (with attention) |
+| Word similarity / analogies | Good | Overkill |
+| Semantic search over short queries | Good | Good but slower |
+| Document retrieval / ranking | Plausible, untested | Better for complex queries |
+| Word sense disambiguation | Limited, no context | Better (with attention) |
 | Text generation | Not possible | Required |
 | Chatbots / conversation | Not possible | Required |
 | Translation | Not possible | Required |
 | Summarization | Not possible | Required |
 
-**SenseGraph is best for:** retrieval, search, similarity, classification, and any task where you need to find the closest match in a vocabulary - fast, offline, and without GPU.
+**SenseGraph is best suited to:** retrieval, similarity and nearest-match lookups over a vocabulary, where it should be fast, work offline and need no GPU.
 
-**Transformers are still needed for:** anything that requires understanding word order, generating text, or reasoning about novel combinations of concepts.
+**Transformers are still needed for:** anything that depends on word order or context, generating text, or reasoning about novel combinations of concepts.
 
 ## Quick Start
 
@@ -258,8 +259,9 @@ https://pixytech.github.io/SenseGraph/ and listed on the Pixytech portal as a
 public app.
 
 - `portal.json` marks the app as `public` and points at the Pages URL.
-- `.github/workflows/deploy-pages.yml` builds the web app with the base path
-  `/SenseGraph/` and deploys it with GitHub Pages.
+- `.github/workflows/ci.yml` tests, typechecks and builds every project, then its
+  deploy job publishes the web app (built with the base path `/SenseGraph/`) to
+  GitHub Pages when the build passes on `main`.
 
 One-time setup: in the repository settings, set Pages to deploy from GitHub
 Actions, and add this repository to the Pixytech Portal GitHub App.
@@ -285,10 +287,20 @@ Actions, and add this repository to the Pixytech Portal GitHub App.
 - **OPFS** - persistent graph cache in browser
 - **Vite + React** - benchmark UI
 
-## Future Directions
+## Future directions
 
-- **WebGPU compute shaders** for graph building (100x faster than CPU)
-- **Real LLM embedding extraction** from safetensors format
-- **Hybrid mode** - use SenseGraph for retrieval, small transformer for reranking
-- **Auto-learning context indicators** from text corpora
-- **Streaming model loading** for 5GB+ models
+Status is as of this version.
+
+| Direction | Status |
+|-----------|--------|
+| Real LLM embedding extraction from safetensors | Done. The app range-reads the embedding tensor of seven models from Hugging Face. |
+| Streaming model loading | Partly done. Only the embedding rows are fetched, so model size is not the limit. Still open: multi-shard models beyond the first shard, and vocabularies above 50,000 tokens. |
+| Compare against real model outputs | Not started. Needed to show quality, not only a faithful shortcut. |
+| Measure real GPU cost against a real forward pass | Not started. Needed to support the GPU-saving claim. |
+| Hybrid mode: SenseGraph retrieval plus a small transformer reranker | Not started. The main answer to the context limitation. |
+| Context-aware graphs from deeper model layers | Not started. A research direction, not a result. |
+| Phrase and n-gram nodes, positional weighting | Not started. Addresses word order and compositional phrases. |
+| WebGPU compute for the graph build | Not started. Speedup over CPU is a goal, not a measurement. |
+| Approximate nearest-neighbor index for the build | Not started. Would reduce the quadratic build cost. |
+| Batched candidate scoring in the Rust core | Not started. A phrase query currently makes about a thousand small WASM calls. |
+| Learning context indicators from text corpora | Not started. |
