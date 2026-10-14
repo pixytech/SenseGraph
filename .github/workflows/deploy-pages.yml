@@ -1,50 +1,11 @@
-name: Deploy to GitHub Pages
+# Superseded by the deploy job in ci.yml. Safe to delete this file.
+name: Deploy to GitHub Pages (unused)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 jobs:
-  build:
+  noop:
     runs-on: ubuntu-latest
-    env:
-      BASE_PATH: /SenseGraph/
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Rust wasm target
-        run: rustup target add wasm32-unknown-unknown
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      # No lockfile is committed yet. After running npm install locally and
-      # committing package-lock.json, switch to npm ci and add cache: npm to
-      # the setup-node step.
-      - run: npm install
-      # Models are loaded from the dropdown at runtime, so no data is baked in.
-      - name: Build the web app
-        run: npx nx build web
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: apps/web/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - run: echo "Deployment now happens in ci.yml after the build passes."
