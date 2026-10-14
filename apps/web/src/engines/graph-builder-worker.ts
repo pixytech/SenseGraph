@@ -32,16 +32,20 @@ self.onmessage = async (e: MessageEvent<BuilderMessage>) => {
   try {
     await init({ module_or_path: msg.wasmUrl });
 
-    const view = new DataView(msg.embData);
-    const embedDim = view.getUint32(4, true);
-    const dtypeCode = view.getUint32(8, true);
-
+    const embedDim = new DataView(msg.embData).getUint32(4, true);
     const handle = create_vector_store(embedDim);
-    const embBytes = new Uint8Array(msg.embData, 16);
 
-    if (dtypeCode === 1) load_embeddings_f16(handle, embBytes);
-    else if (dtypeCode === 3) load_embeddings_bf16(handle, embBytes);
-    else load_embeddings_f32(handle, embBytes);
+    // The raw table is only needed while it is copied into the WASM store. The block scope and
+    // the null assignment below drop every reference to it, so the memory can be reclaimed
+    // instead of staying resident for the whole build.
+    {
+      const dtypeCode = new DataView(msg.embData).getUint32(8, true);
+      const embBytes = new Uint8Array(msg.embData, 16);
+      if (dtypeCode === 1) load_embeddings_f16(handle, embBytes);
+      else if (dtypeCode === 3) load_embeddings_bf16(handle, embBytes);
+      else load_embeddings_f32(handle, embBytes);
+    }
+    (msg as { embData: ArrayBuffer | null }).embData = null;
 
     init_neighbor_graph(handle, msg.rangeEnd, msg.k);
 

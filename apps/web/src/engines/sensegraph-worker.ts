@@ -156,14 +156,34 @@ async function loadOrBuildGraph(vocabSize: number, embedDim: number) {
   await buildGraphParallel(vocabSize, embedDim, resumeFrom, gFile, pFile);
 }
 
+// Every builder worker holds its own copy of the embedding table plus a float32 copy inside its
+// WASM store, so memory grows with the worker count. Phones and tablets kill a tab that goes
+// over roughly 1 GB, so the number of workers is limited by an estimate of memory, not only by
+// the number of cores.
+function pickWorkerCount(vocabSize: number, embedDim: number, rawBytes: number): { count: number; note: string } {
+  const cores = navigator.hardwareConcurrency || 4;
+  const ua = navigator.userAgent || "";
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));
+  const deviceGb: number | undefined = (navigator as any).deviceMemory;
+  const MB = 1024 * 1024;
+  const budget = mobile ? (deviceGb || 3) * 1024 * MB * 0.2 : (deviceGb || 8) * 1024 * MB * 0.5;
+  // Peak per worker: the raw copy it is sent plus the float32 copy it builds.
+  const perWorker = rawBytes + vocabSize * embedDim * 4;
+  const byMemory = Math.max(1, Math.floor(budget / Math.max(perWorker, 1)));
+  const byCores = Math.min(cores, 8);
+  const count = Math.max(1, Math.min(byCores, byMemory));
+  const note = count < byCores ? `, limited to ${count} by memory (~${Math.round(perWorker / MB)} MB each)` : "";
+  return { count, note };
+}
+
 async function buildGraphParallel(vocabSize: number, embedDim: number, startFrom: number, gFile: string, pFile: string) {
-  const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 8);
+  const { count: numWorkers, note: workerNote } = pickWorkerCount(vocabSize, embedDim, rawEmbData ? rawEmbData.byteLength : 0);
   const remaining = vocabSize - startFrom;
   const chunkSize = Math.ceil(remaining / numWorkers);
 
   post({
     type: "progress",
-    message: `Spawning ${numWorkers} parallel builders (${navigator.hardwareConcurrency} CPU cores detected)...`,
+    message: `Spawning ${numWorkers} parallel builders (${navigator.hardwareConcurrency} CPU cores detected${workerNote})...`,
     percent: 56,
   });
 
