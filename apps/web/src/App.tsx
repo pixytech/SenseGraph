@@ -12,6 +12,7 @@ type Tab = "benchmark" | "diagrams";
 interface SuiteRow {
   query: string;
   tokens: string[];
+  ignored: string[];
   trMs: number;
   sgMs: number;
   speedup: number;
@@ -193,6 +194,7 @@ export default function App() {
         const row: SuiteRow = {
           query: text,
           tokens: g?.tokens ?? [],
+          ignored: g?.ignored ?? [],
           trMs,
           sgMs,
           speedup: sgMs > 0 ? trMs / sgMs : 0,
@@ -429,7 +431,7 @@ function SuiteTable({ rows }: { rows: SuiteRow[] }) {
             <div className="suite-detail">
               <div><strong>Input tokens ({r.tokens.length})</strong></div>
               <div className="token-row">
-                {r.tokens.map((t, k) => <span key={k} className="token-chip">{t.trim() || "(space)"}</span>)}
+                {r.tokens.map((t, k) => <span key={k} className={r.ignored.includes(t) ? "token-chip ignored" : "token-chip"} title={r.ignored.includes(t) ? "Stop word, not used to build the query" : undefined}>{t.trim() || "(space)"}</span>)}
               </div>
               <div className="suite-outputs">
                 <div><strong>Baseline top 5</strong><div>{r.trOut.join(", ")}</div></div>
@@ -489,7 +491,10 @@ function ResultPanel({ title, result, color }: { title: string; result: EngineRe
           {result.error && <p className="error">{result.error}</p>}
           {result.tokens && result.tokens.length > 0 && (
             <div className="token-row">
-              {result.tokens.map((t, i) => <span key={i} className="token-chip">{t.trim() || "(space)"}</span>)}
+              {result.tokens.map((t, i) => {
+                const skipped = !!result.ignored && result.ignored.includes(t);
+                return <span key={i} className={skipped ? "token-chip ignored" : "token-chip"} title={skipped ? "Stop word, not used to build the query" : undefined}>{t.trim() || "(space)"}</span>;
+              })}
             </div>
           )}
           <div className="meta-row">

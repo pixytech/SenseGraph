@@ -13,6 +13,7 @@ export interface EngineResult {
   memoryMB?: number;
   engine: "transformer" | "sensegraph";
   tokens?: string[];
+  ignored?: string[];
   candidates?: number;
   error?: string;
 }

@@ -17,7 +17,7 @@ import init, {
 } from "../../wasm-pkg/sensegraph_core.js";
 import { createTokenizer, type BPETokenizer } from "../tokenizer/bpe-browser";
 import type { WorkerMessage, WorkerResponse, SimilarResult, ModelSizeInfo } from "./types";
-import { cleanResults } from "./shared";
+import { cleanResults, contentIds } from "./shared";
 import type { BuilderResponse } from "./graph-builder-worker";
 
 let storeHandle: number | null = null;
@@ -323,6 +323,8 @@ function groupNorm(counts: Map<number, number>): number {
 // Composes a multi token query from the precomputed neighbor lists of its tokens.
 // Candidates are the union of those lists, scored by the cosine to the mean of the
 // normalized token vectors. No pass over the whole vocabulary is needed.
+const REFINE_TOP = 10;
+
 function rank(ids: number[], k: number): { results: SimilarResult[]; candidates: number } {
   const counts = countsOf(ids);
   if (counts.size === 1) {
@@ -340,14 +342,29 @@ function rank(ids: number[], k: number): { results: SimilarResult[]; candidates:
   }
 
   const norm = groupNorm(counts);
-  const scored: SimilarResult[] = [];
-  for (const c of candidates) {
+  const scoreOf = (c: number): number => {
     let dot = 0;
     for (const [q, n] of counts) dot += n * cosine_sim(storeHandle!, c, q);
-    scored.push({ word: label(c), score: dot / norm, index: c });
+    return dot / norm;
+  };
+  const scored: SimilarResult[] = [];
+  for (const c of candidates) scored.push({ word: label(c), score: scoreOf(c), index: c });
+  scored.sort((a, b) => b.score - a.score);
+
+  // Refinement round: the best candidates so far are themselves well connected, so their
+  // neighbors are likely to contain results that no single query token lists directly.
+  const seen = new Set<number>(candidates);
+  for (const q of counts.keys()) seen.add(q);
+  const frontier = scored.slice(0, REFINE_TOP);
+  for (const f of frontier) {
+    for (const r of neighborsOf(f.index)) {
+      if (seen.has(r.index)) continue;
+      seen.add(r.index);
+      scored.push({ word: label(r.index), score: scoreOf(r.index), index: r.index });
+    }
   }
   scored.sort((a, b) => b.score - a.score);
-  return { results: scored.slice(0, k), candidates: candidates.size };
+  return { results: scored.slice(0, k), candidates: scored.length };
 }
 
 function notReady(type: "similar" | "search" | "compare", query: string): boolean {
@@ -367,9 +384,10 @@ function handleRank(type: "similar" | "search", text: string, topK: number) {
       post({ type: "result", data: { type, query: text, results: [], latencyMs: performance.now() - t0, engine: "sensegraph", error: `No known tokens in "${text}"` } });
       return;
     }
-    const { results, candidates } = rank(ids, topK + 20);
+    const { used, ignored } = type === "search" ? contentIds(ids, label) : { used: ids, ignored: [] as number[] };
+    const { results, candidates } = rank(used, topK + 20);
     const cleaned = cleanResults(results, topK, type === "search");
-    post({ type: "result", data: { type, query: text, results: cleaned, latencyMs: performance.now() - t0, engine: "sensegraph", tokens: ids.map(label), candidates } });
+    post({ type: "result", data: { type, query: text, results: cleaned, latencyMs: performance.now() - t0, engine: "sensegraph", tokens: ids.map(label), ignored: ignored.map(label), candidates } });
   } catch (err: any) {
     post({ type: "result", data: { type, query: text, results: [], latencyMs: 0, engine: "sensegraph", error: String(err) } });
   }

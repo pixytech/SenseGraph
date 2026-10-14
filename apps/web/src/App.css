@@ -588,3 +588,5 @@ body {
 .suite-outputs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
 .suite-meta { margin-top: 8px; color: var(--text-dim); font-size: 12px; }
 @media (max-width: 700px) { .suite-outputs { grid-template-columns: 1fr; } }
+
+.token-chip.ignored { opacity: 0.45; text-decoration: line-through; }

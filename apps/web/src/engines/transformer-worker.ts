@@ -1,6 +1,6 @@
 import type { WorkerMessage, WorkerResponse, SimilarResult } from "./types";
 import { createTokenizer, type BPETokenizer } from "../tokenizer/bpe-browser";
-import { cleanResults } from "./shared";
+import { cleanResults, contentIds } from "./shared";
 
 let embeddings: Float32Array | null = null;
 let vocab: string[] = [];
@@ -208,10 +208,12 @@ function handleRank(type: "similar" | "search", text: string, topK: number) {
     return;
   }
   const t0 = performance.now();
-  const { results, ops } = fullVocabAttentionSearch(ids, topK + 20);
+  const text_of = (i: number) => tokenizer!.tokenText(i);
+  const { used, ignored } = type === "search" ? contentIds(ids, text_of) : { used: ids, ignored: [] as number[] };
+  const { results, ops } = fullVocabAttentionSearch(used, topK + 20);
   const latencyMs = performance.now() - t0;
   const cleaned = cleanResults(results, topK, type === "search");
-  post({ type: "result", data: { type, query: text, results: cleaned, latencyMs, operationCount: ops, engine: "transformer", tokens: ids.map((i) => tokenizer!.tokenText(i)) } });
+  post({ type: "result", data: { type, query: text, results: cleaned, latencyMs, operationCount: ops, engine: "transformer", tokens: ids.map(text_of), ignored: ignored.map(text_of) } });
 }
 
 function meanUnit(ids: number[]): Float32Array {

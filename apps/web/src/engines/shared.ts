@@ -3,7 +3,25 @@ import type { SimilarResult } from "./types";
 export const STOP_WORDS = new Set([
   "the", "a", "an", "is", "was", "are", "in", "on", "at", "to", "for", "of", "with",
   "by", "and", "or", "but", "not", "it", "its", "this", "that",
+  "from", "into", "as", "be", "been", "were", "has", "have", "had", "do", "does", "did",
+  "than", "then", "so", "if", "about", "after", "before", "off", "up", "out",
+  "my", "your", "our", "their", "his", "her", "he", "she", "we", "they", "you", "i",
+  "will", "would", "can", "could", "should",
 ]);
+
+// Splits query token ids into those that carry meaning and those that are function words.
+// Both engines use only the meaningful ones to build a search query, so the exact scan and
+// the graph answer the same question. If every token is a stop word, all of them are used.
+export function contentIds(ids: number[], label: (id: number) => string): { used: number[]; ignored: number[] } {
+  const used: number[] = [];
+  const ignored: number[] = [];
+  for (const id of ids) {
+    const t = label(id).trim().toLowerCase();
+    if (t.length < 2 || STOP_WORDS.has(t)) ignored.push(id);
+    else used.push(id);
+  }
+  return used.length === 0 ? { used: ids, ignored: [] } : { used, ignored };
+}
 
 // Drops whitespace-only tokens. For search queries it also drops stop words and
 // one character tokens, which add noise when ranking by meaning.

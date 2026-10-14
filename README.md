@@ -133,7 +133,9 @@ embedding tensor are then handed to both engines, so they process identical
 input and are asked for the same ranking. Single-token queries should match
 exactly. For multi-token queries SenseGraph only scores candidates taken from
 neighbor lists, so the page reports the top-10 overlap with the exact scan
-instead of assuming it is 100%. The neighbor
+instead of assuming it is 100%. For search queries both engines drop stop words (shown struck through in the token list)
+before building the query vector, so they answer the same question, and SenseGraph runs one
+refinement round that also scores the neighbors of its best candidates. The neighbor
 graph cached in OPFS is keyed by model, so switching models never reuses another
 model's graph. The comparison measures a precomputed neighbor lookup against a
 brute-force scan of the vocabulary plus a simulated attention step. It does not
