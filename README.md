@@ -30,7 +30,7 @@ The app reads the safetensors header of a Hugging Face model and downloads only 
 
 ### Step 2: Build Neighbor Graph (one-time)
 
-For each token in the vocabulary, SenseGraph precomputes its 20 nearest neighbors by cosine similarity. A single-token query then needs one lookup. The build runs once per model, in parallel web workers, and is cached.
+For each token in the vocabulary, SenseGraph precomputes its 20 nearest neighbors by cosine similarity. A single-token query then needs one lookup. The build runs once per model, in parallel web workers, and is cached. It is tiled: each worker owns a range of rows, and the rest of the table is streamed to it one small tile at a time, so no worker holds the whole table. This keeps memory low enough for phones, and the result is the same as an all-pairs search over the full table.
 
 ### Step 3: Query via Graph Lookup
 
@@ -93,18 +93,21 @@ flowchart LR
   CW --> WASM["sensegraph-core WASM"]
   CW -->|spawns up to 8| GB[graph-builder-workers]
   GB --> WASM
-  CW <--> OPFS[("OPFS cache<br/>neighbor graph and checkpoints")]
+  CW <--> OPFS[("OPFS cache<br/>neighbor graph")]
   CW --> SRC[("Embeddings<br/>Hugging Face model, downloaded once")]
   TW --> SRC
 ```
 
 - **sensegraph-worker** loads the WASM module, the tokenizer and the embeddings,
-  then either restores the neighbor graph from OPFS or builds it with up to 8
-  parallel graph-builder workers (K = 20, batches of 500). Progress is
-  checkpointed to OPFS, so an interrupted build resumes where it stopped. A
-  single-token query is one neighbor lookup. A multi-token query takes the union
-  of the neighbor lists of its tokens as candidates and scores only those against
-  the mean of the normalized token vectors.
+  then either restores the neighbor graph from OPFS or builds it with parallel
+  graph-builder workers (K = 20). The worker count is the number of cores, up to
+  8, reduced when an estimate of memory says the device cannot hold that many
+  (phones get a smaller budget). Each builder owns a range of rows and receives
+  the rest of the table tile by tile, merging each tile's nearest neighbors into
+  a running top 20. The finished graph is saved to OPFS. A single-token query is
+  one neighbor lookup. A multi-token query takes the union of the neighbor lists
+  of its tokens as candidates, adds the neighbors of the best ones (one
+  refinement round), and scores all of them in one batched WASM call.
 - **transformer-worker** is the baseline. For each query it simulates one
   attention pass over the query tokens (Q, K and V from the embeddings, scaled
   dot-product scores, softmax, weighted sum), then scans the whole vocabulary
@@ -144,31 +147,34 @@ model, not a measurement of a real model.
 
 ## Benchmark Results
 
-Measured in the live app with SmolLM2 135M (49,152 tokens, 576 dimensions) and 8 worker threads. Results differ per model and machine.
+Measured in the live app with Qwen2.5-Coder 1.5B (50,000 tokens indexed, 1,536 dimensions) and 8 worker threads. Results differ per model and machine, and single runs are noisy.
 
-| Metric | Baseline (simulated attention + scan) | SenseGraph |
-|--------|-------------|------------|
-| Average over 48 mixed queries | 59.3 ms | 1.4 ms |
-| 95th percentile | 96.4 ms | 3.7 ms |
-| Speedup over the run | 1x | about 43x |
-| Top 10 overlap with the exact scan | reference | 100% on the queries checked |
-| One-time graph build | - | 114 s, 7.5 MB graph |
+| Metric | Baseline (simulated attention + scan) | SenseGraph | Speedup |
+|--------|-------------|------------|---------|
+| Single phrase ("sort array of objects by key", 97 candidates) | 195.4 ms | 2.3 ms | 85x |
+| Complex task suite, 12 queries, total | 932.2 ms | 7.0 ms | 133x |
+| Continuous run, 105 queries at 2 per second, average | 152.1 ms | 0.9 ms | 177x |
+| Continuous run, 95th percentile | 287.9 ms | 2.2 ms | |
+| Top 10 overlap with the exact scan | reference | 100% on the phrase and on all 12 suite queries | |
+| One-time graph build | - | 311 s on 8 threads, 7.6 MB graph | |
+
+The baseline is about twice as slow in the continuous run as in the suite, probably from contention in the tab, so 177x is likely flattering and the suite's 133x is the steadier figure. The smaller Qwen 2.5 0.5B gave 73x on the same suite, and an earlier SmolLM2 135M run (before stop words, refinement and batched scoring) gave about 43x on average with a 114 s build.
 
 The overlap compares the graph with an exact scan of the same vectors, so it shows the graph is a faithful shortcut for retrieval. It does not show that results match a real model's outputs. The speedup comes from precomputation, not from the browser: the same approach would run in Node, natively or on a server.
 
 ## Strengths
 
-1. **Much faster retrieval** - a graph lookup plus scoring a small candidate set, against a vocabulary scan. About 43x on average in the run above, against a simulated baseline.
+1. **Much faster retrieval** - a graph lookup plus scoring a small candidate set, against a vocabulary scan. About 133x on the 12 query suite in the run above, against a simulated baseline.
 
 2. **No GPU needed for the lookup** - it runs on CPU in WASM, with no CUDA, no GPU memory and no drivers, in any modern browser.
 
-3. **Small footprint** - only the embedding rows are downloaded, and the graph adds a few megabytes (7.5 MB for SmolLM2 135M).
+3. **Small footprint** - only the embedding rows are downloaded, and the graph adds a few megabytes (7.6 MB for the 1.5B model).
 
 4. **Predictable latency for single tokens** - a single-token query is one lookup, independent of input length.
 
 5. **Works offline** - once the model rows and graph are cached in the browser (OPFS), no network is needed.
 
-6. **Parallel, resumable build** - the graph is built by 8 workers and checkpoints to OPFS, so an interrupted build resumes.
+6. **Parallel, memory-bounded build** - the graph is built by up to 8 workers from small tiles of the table, with the worker count reduced on devices with little memory.
 
 ## Limitations
 
@@ -180,7 +186,7 @@ Each limitation is listed with its status in this repository.
 
 3. **No word order.** A phrase is scored against the mean of its tokens' normalized vectors, so "the cat sat on the mat" and "the mat sat on the cat" score identically. Direction: phrase or n-gram nodes in the graph, and positional weighting.
 
-4. **One-time build cost.** The graph is built once per model: 114 s for 49,152 tokens at 576 dimensions on 8 workers. The all-pairs search grows roughly with the square of the vocabulary size and linearly with the embedding dimension, so a vocabulary twice the size would take about four times as long, an estimate that has not been measured. The app caps large vocabularies at the first 50,000 tokens to keep the build practical. Direction: WebGPU compute for the build, or an approximate nearest-neighbor index in place of the exact all-pairs search.
+4. **One-time build cost.** The graph is built once per model: 114 s for 49,152 tokens at 576 dimensions, and 311 s for 50,000 tokens at 1,536 dimensions, on 8 workers. The all-pairs search grows roughly with the square of the vocabulary size and linearly with the embedding dimension, so a vocabulary twice the size would take about four times as long, an estimate that has not been measured. The app caps large vocabularies at the first 50,000 tokens to keep the build practical. Direction: WebGPU compute for the build, or an approximate nearest-neighbor index in place of the exact all-pairs search.
 
 5. **Vocabulary coverage.** The byte-level BPE tokenizers cover any input through byte fallback, so there is no true out-of-vocabulary failure, but a rare word is split into sub-word tokens whose vectors are averaged. For models with vocabularies above 50,000 tokens, only the first 50,000 rows are indexed, so tokens beyond that are not searchable. Direction: a larger cap with a faster build.
 
@@ -304,5 +310,6 @@ Status is as of this version.
 | Phrase and n-gram nodes, positional weighting | Not started. Addresses word order and compositional phrases. |
 | WebGPU compute for the graph build | Not started. Speedup over CPU is a goal, not a measurement. |
 | Approximate nearest-neighbor index for the build | Not started. Would reduce the quadratic build cost. |
+| Tiled, memory-bounded graph build | Done. Workers stream the table in tiles, so phones with little memory can build. Still open: streaming the download straight to browser storage instead of holding the table in memory, and testing on a range of phones. |
 | Batched candidate scoring in the Rust core | Done. `score_candidates` scores a whole candidate list in one WASM call, with one dot product per candidate. It replaces about a thousand small calls per phrase query. |
 | Learning context indicators from text corpora | Not started. Today they are added by hand for a few words in the CLI. |
