@@ -11,8 +11,6 @@ import init, {
   init_neighbor_graph,
   export_neighbor_graph,
   import_neighbor_graph,
-  merge_neighbor_range,
-  extend_neighbor_graph,
   lookup_neighbors,
   neighbor_graph_size,
 } from "../../wasm-pkg/sensegraph_core.js";
@@ -27,7 +25,6 @@ let rawEmbData: ArrayBuffer | null = null;
 let cacheTag = "model";
 let rowCount = 0;
 const NEIGHBORS_K = 20;
-const BATCH_SIZE = 500;
 
 function getSizeInfo(vocabSize: number, embedDim: number, graphIndexed: number): ModelSizeInfo {
   const embMB = (vocabSize * embedDim * 4) / (1024 * 1024);
@@ -141,131 +138,172 @@ async function loadOrBuildGraph(vocabSize: number, embedDim: number) {
     post({ type: "progress", message: `Cache incomplete (${(cachedBytes/1024).toFixed(0)}KB / ${(expectedSize/1024).toFixed(0)}KB), rebuilding...`, percent: 50 });
   }
 
-  let resumeFrom = 0;
-  const partial = await opfsRead(pFile);
-  if (partial && partial.byteLength > 8) {
-    post({ type: "progress", message: `Resuming from OPFS checkpoint (${(partial.byteLength / 1024 / 1024).toFixed(1)} MB)...`, percent: 52 });
-    import_neighbor_graph(storeHandle!, new Uint8Array(partial));
-    resumeFrom = neighbor_graph_size(storeHandle!);
-    extend_neighbor_graph(storeHandle!, vocabSize);
-    post({ type: "progress", message: `Resuming from word ${resumeFrom.toLocaleString()}/${vocabSize.toLocaleString()}`, percent: 54 });
-  } else {
-    init_neighbor_graph(storeHandle!, vocabSize, NEIGHBORS_K);
-  }
+  // The tiled build always starts from the first row, so an old partial checkpoint is not used.
+  const resumeFrom = 0;
+  await opfsDelete(pFile);
 
   await buildGraphParallel(vocabSize, embedDim, resumeFrom, gFile, pFile);
 }
 
-// Every builder worker holds its own copy of the embedding table plus a float32 copy inside its
-// WASM store, so memory grows with the worker count. Phones and tablets kill a tab that goes
-// over roughly 1 GB, so the number of workers is limited by an estimate of memory, not only by
-// the number of cores.
-function pickWorkerCount(vocabSize: number, embedDim: number, rawBytes: number): { count: number; note: string } {
+// The graph is built from tiles. Each builder worker owns a range of query rows, and the rest of
+// the embedding table is streamed to every builder one tile at a time, so no worker ever holds
+// the whole table twice. Memory per worker is its own rows plus one tile, a few megabytes,
+// instead of two full copies of the table. The number of workers is still limited by an estimate
+// of memory, because phones kill a tab that goes over roughly 1 GB.
+const BLOCK_ROWS = 512;
+const TILE_BYTES = 6 * 1024 * 1024;
+
+function pickWorkerCount(vocabSize: number, embedDim: number, rowBytes: number): { count: number; note: string } {
   const cores = navigator.hardwareConcurrency || 4;
   const ua = navigator.userAgent || "";
   const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));
   const deviceGb: number | undefined = (navigator as any).deviceMemory;
   const MB = 1024 * 1024;
   const budget = mobile ? (deviceGb || 3) * 1024 * MB * 0.2 : (deviceGb || 8) * 1024 * MB * 0.5;
-  // Peak per worker: the raw copy it is sent plus the float32 copy it builds.
-  const perWorker = rawBytes + vocabSize * embedDim * 4;
-  const byMemory = Math.max(1, Math.floor(budget / Math.max(perWorker, 1)));
   const byCores = Math.min(cores, 8);
+  const ownRows = Math.ceil(vocabSize / byCores) * rowBytes;
+  const store = (BLOCK_ROWS + Math.ceil(TILE_BYTES / (embedDim * 4))) * embedDim * 4 * 2;
+  const perWorker = ownRows + store + 25 * MB; // plus the WASM instance and message buffers
+  const byMemory = Math.max(1, Math.floor(budget / perWorker));
   const count = Math.max(1, Math.min(byCores, byMemory));
   const note = count < byCores ? `, limited to ${count} by memory (~${Math.round(perWorker / MB)} MB each)` : "";
   return { count, note };
 }
 
-async function buildGraphParallel(vocabSize: number, embedDim: number, startFrom: number, gFile: string, pFile: string) {
-  const { count: numWorkers, note: workerNote } = pickWorkerCount(vocabSize, embedDim, rawEmbData ? rawEmbData.byteLength : 0);
-  const remaining = vocabSize - startFrom;
-  const chunkSize = Math.ceil(remaining / numWorkers);
+async function buildGraphParallel(vocabSize: number, embedDim: number, _startFrom: number, gFile: string, pFile: string) {
+  if (!rawEmbData) {
+    post({ type: "error", message: "Embedding data not available for the graph build" });
+    return;
+  }
+  const raw = rawEmbData;
+  const dtypeCode = new DataView(raw).getUint32(8, true);
+  const rowBytes = embedDim * (dtypeCode === 2 ? 4 : 2);
+  const HEADER = 16;
+
+  const { count: numWorkers, note: workerNote } = pickWorkerCount(vocabSize, embedDim, rowBytes);
+  const chunkSize = Math.ceil(vocabSize / numWorkers);
+  const tileRows = Math.max(BLOCK_ROWS, Math.floor(TILE_BYTES / (embedDim * 4)));
+  const nTiles = Math.ceil(vocabSize / tileRows);
 
   post({
     type: "progress",
-    message: `Spawning ${numWorkers} parallel builders (${navigator.hardwareConcurrency} CPU cores detected${workerNote})...`,
+    message: `Spawning ${numWorkers} parallel builders (${navigator.hardwareConcurrency} CPU cores detected${workerNote}), ${nTiles} tiles...`,
     percent: 56,
   });
 
-  if (!rawEmbData) {
-    post({ type: "error", message: "Embedding data not available for parallel build" });
-    return;
-  }
+  // A build always starts from row 0 in this scheme, so any partial graph is discarded.
+  init_neighbor_graph(storeHandle!, vocabSize, NEIGHBORS_K);
+
   const startTime = performance.now();
+  const wasmUrl = `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm?v=${__WASM_VERSION__}`;
 
-  const workerProgress = new Map<number, { done: number; ops: number }>();
-  let completedRanges = 0;
+  type Slot = {
+    worker: Worker;
+    rangeStart: number;
+    rangeEnd: number;
+    onTile: ((ops: number) => void) | null;
+    onReady: (() => void) | null;
+    onDone: ((ids: Uint32Array, scores: Float32Array) => void) | null;
+    onError: (err: Error) => void;
+  };
+  const slots: Slot[] = [];
+  let failure: Error | null = null;
 
-  await new Promise<void>((resolve, reject) => {
-    for (let w = 0; w < numWorkers; w++) {
-      const rangeStart = startFrom + w * chunkSize;
-      const rangeEnd = Math.min(rangeStart + chunkSize, vocabSize);
-      if (rangeStart >= vocabSize) {
-        completedRanges++;
-        if (completedRanges >= numWorkers) resolve();
-        continue;
-      }
+  const readyPromises: Promise<void>[] = [];
+  for (let w = 0; w < numWorkers; w++) {
+    const rs = w * chunkSize;
+    const re = Math.min(rs + chunkSize, vocabSize);
+    if (rs >= vocabSize) break;
+    const worker = new Worker(new URL("./graph-builder-worker.ts", import.meta.url), { type: "module" });
+    const slot: Slot = {
+      worker, rangeStart: rs, rangeEnd: re,
+      onTile: null, onReady: null, onDone: null,
+      onError: (err) => { failure = failure || err; },
+    };
+    worker.onmessage = (e: MessageEvent<BuilderResponse>) => {
+      const m = e.data;
+      if (m.type === "ready") slot.onReady?.();
+      else if (m.type === "tileDone") slot.onTile?.(m.ops);
+      else if (m.type === "done") slot.onDone?.(new Uint32Array(m.ids), new Float32Array(m.scores));
+      else if (m.type === "error") slot.onError(new Error(m.message));
+    };
+    worker.onerror = (ev) => slot.onError(new Error(ev.message || "graph builder worker failed"));
+    slots.push(slot);
 
-      workerProgress.set(rangeStart, { done: 0, ops: 0 });
+    const rows = raw.slice(HEADER + rs * rowBytes, HEADER + re * rowBytes);
+    readyPromises.push(new Promise<void>((resolve, reject) => {
+      slot.onReady = resolve;
+      slot.onError = (err) => { failure = failure || err; reject(err); };
+    }));
+    worker.postMessage(
+      { type: "init", wasmUrl, embedDim, dtypeCode, k: NEIGHBORS_K, rangeStart: rs, rangeEnd: re, blockRows: BLOCK_ROWS, rows },
+      [rows],
+    );
+  }
 
-      const worker = new Worker(
-        new URL("./graph-builder-worker.ts", import.meta.url),
-        { type: "module" }
-      );
+  let totalOps = 0;
+  try {
+    await Promise.all(readyPromises);
 
-      const embCopy = rawEmbData!.slice(0);
+    for (let t = 0; t < nTiles; t++) {
+      const tStart = t * tileRows;
+      const tEnd = Math.min(tStart + tileRows, vocabSize);
+      const tileBytes = raw.slice(HEADER + tStart * rowBytes, HEADER + tEnd * rowBytes);
 
-      worker.onmessage = (e: MessageEvent<BuilderResponse>) => {
-        const msg = e.data;
-        if (msg.type === "progress") {
-          workerProgress.set(msg.rangeStart, { done: msg.done, ops: msg.ops });
+      // Flow control: the next tile is sent only after every builder has finished this one,
+      // so at most one tile per builder is in flight.
+      await Promise.all(slots.map((slot) => new Promise<void>((resolve, reject) => {
+        slot.onTile = (ops) => { totalOps += ops; resolve(); };
+        slot.onError = (err) => { failure = failure || err; reject(err); };
+        const copy = tileBytes.slice(0);
+        slot.worker.postMessage({ type: "tile", tileStart: tStart, tileEnd: tEnd, rows: copy }, [copy]);
+      })));
 
-          let totalDone = 0;
-          let totalOps = 0;
-          for (const p of workerProgress.values()) {
-            totalDone += p.done;
-            totalOps += p.ops;
-          }
-
-          const elapsed = (performance.now() - startTime) / 1000;
-          const wordsPerSec = totalDone / Math.max(elapsed, 0.1);
-          const eta = (remaining - totalDone) / Math.max(wordsPerSec, 1);
-          const pct = 57 + Math.round((totalDone / remaining) * 35);
-
-          post({
-            type: "progress",
-            message: `Building: ${(startFrom + totalDone).toLocaleString()}/${vocabSize.toLocaleString()} | ${numWorkers} threads | ${wordsPerSec.toFixed(0)} words/s | ${(totalOps / Math.max(elapsed, 0.1) / 1e6).toFixed(0)}M ops/s | ETA: ${formatTime(eta)}`,
-            percent: pct,
-          });
-        } else if (msg.type === "done") {
-          merge_neighbor_range(storeHandle!, msg.rangeStart, new Uint8Array(msg.graphData));
-          worker.terminate();
-          completedRanges++;
-          if (completedRanges >= numWorkers) resolve();
-        } else if (msg.type === "error") {
-          worker.terminate();
-          reject(new Error(msg.message));
-        }
-      };
-
-      worker.postMessage(
-        {
-          type: "init",
-          wasmUrl: `${import.meta.env.BASE_URL}sensegraph_core_bg.wasm?v=${__WASM_VERSION__}`,
-          embData: embCopy,
-          vocabSize, embedDim, rangeStart, rangeEnd,
-          k: NEIGHBORS_K, batchSize: BATCH_SIZE,
-        },
-        [embCopy]
-      );
+      const done = t + 1;
+      const elapsed = (performance.now() - startTime) / 1000;
+      const wordsDone = Math.round((vocabSize * done) / nTiles);
+      const wordsPerSec = wordsDone / Math.max(elapsed, 0.1);
+      const eta = (vocabSize - wordsDone) / Math.max(wordsPerSec, 1);
+      post({
+        type: "progress",
+        message: `Building: tile ${done}/${nTiles} | ${numWorkers} threads | ${wordsPerSec.toFixed(0)} words/s | ${(totalOps / Math.max(elapsed, 0.1) / 1e6).toFixed(0)}M ops/s | ETA: ${formatTime(eta)}`,
+        percent: 57 + Math.round((done / nTiles) * 35),
+      });
     }
-  });
+
+    // Collect each builder's rows and assemble one graph in the export format:
+    // n and k, then for every row k ids followed by k scores.
+    const K = NEIGHBORS_K;
+    const out = new ArrayBuffer(8 + vocabSize * K * 8);
+    const dv = new DataView(out);
+    dv.setUint32(0, vocabSize, true);
+    dv.setUint32(4, K, true);
+    await Promise.all(slots.map((slot) => new Promise<void>((resolve, reject) => {
+      slot.onError = (err) => { failure = failure || err; reject(err); };
+      slot.onDone = (ids, scores) => {
+        const n = slot.rangeEnd - slot.rangeStart;
+        for (let r = 0; r < n; r++) {
+          const rowOff = 8 + (slot.rangeStart + r) * K * 8;
+          for (let j = 0; j < K; j++) {
+            dv.setUint32(rowOff + j * 4, ids[r * K + j], true);
+            dv.setFloat32(rowOff + K * 4 + j * 4, scores[r * K + j], true);
+          }
+        }
+        resolve();
+      };
+      slot.worker.postMessage({ type: "finish" });
+    })));
+    import_neighbor_graph(storeHandle!, new Uint8Array(out));
+  } catch (err) {
+    throw failure || err;
+  } finally {
+    for (const slot of slots) slot.worker.terminate();
+  }
 
   const totalTime = (performance.now() - startTime) / 1000;
 
   post({ type: "progress", message: "Saving to OPFS...", percent: 92 });
 
-  extend_neighbor_graph(storeHandle!, vocabSize);
   const graphData = export_neighbor_graph(storeHandle!);
   const graphBuf = new Uint8Array(graphData).buffer;
   await opfsWrite(gFile, graphBuf);
